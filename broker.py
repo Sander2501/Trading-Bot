@@ -4,7 +4,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.requests import MarketOrderRequest, GetOrdersRequest
 from alpaca.trading.enums import OrderSide, TimeInForce, QueryOrderStatus
 
 load_dotenv()
@@ -45,22 +45,16 @@ class AlpacaBroker:
         return pd.Series(closes, dtype=float)
 
     def get_position_qty(self, symbol: str) -> int:
-        positions = self.client.get_all_positions()
-
-        for position in positions:
-            if position.symbol == symbol:
-                return int(float(position.qty))
-
-        return 0
+        try:
+            position = self.client.get_open_position(symbol)
+            return int(float(position.qty))
+        except Exception:
+            return 0
 
     def has_open_order(self, symbol: str) -> bool:
-        orders = self.client.get_orders(filter=QueryOrderStatus.OPEN)
-
-        for order in orders:
-            if order.symbol == symbol:
-                return True
-
-        return False
+        request = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[symbol])
+        orders = self.client.get_orders(filter=request)
+        return len(orders) > 0
 
     def submit_buy(self, symbol: str, qty: int) -> None:
         order = MarketOrderRequest(
@@ -80,6 +74,10 @@ class AlpacaBroker:
         )
         self.client.submit_order(order_data=order)
 
-    def is_market_open(self) -> bool:
+    def get_market_status(self) -> tuple[bool, float]:
+        """Returns (is_open, seconds_until_open). Single API call."""
         clock = self.client.get_clock()
-        return bool(clock.is_open)
+        if clock.is_open:
+            return True, 0.0
+        delta = clock.next_open - clock.timestamp
+        return False, max(0.0, delta.total_seconds())
