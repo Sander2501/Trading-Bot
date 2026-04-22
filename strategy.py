@@ -1,22 +1,33 @@
 import pandas as pd
 
 
-def moving_average_signal(closes: pd.Series, window: int = 20) -> str:
+def moving_average_signal(
+    closes: pd.Series,
+    window: int = 20,
+    confirm_bars: int = 1,
+) -> str:
     """
-    Returns BUY, SELL, or HOLD based on price/MA crossover:
-    - BUY:  price crossed above the moving average
-    - SELL: price crossed below the moving average
-    - HOLD: no crossover, or not enough data
+    Returns BUY, SELL, or HOLD based on price vs. moving average.
+
+    BUY  if the last `confirm_bars` closes are all above the MA.
+    SELL if the last `confirm_bars` closes are all below the MA.
+    HOLD otherwise.
+
+    The MA is computed over the `window` bars preceding the confirmation
+    window so the MA and the comparison prices are independent.
     """
-    if len(closes) < window + 1:
+    if confirm_bars < 1:
+        raise ValueError("confirm_bars must be >= 1")
+
+    required = window + confirm_bars
+    if len(closes) < required:
         return "HOLD"
 
-    ma = float(closes.tail(window).mean())
-    prev_price = float(closes.iloc[-2])
-    curr_price = float(closes.iloc[-1])
+    ma = float(closes.iloc[-required:-confirm_bars].mean())
+    recent = closes.iloc[-confirm_bars:].astype(float)
 
-    if prev_price <= ma and curr_price > ma:
+    if (recent > ma).all():
         return "BUY"
-    elif prev_price >= ma and curr_price < ma:
+    if (recent < ma).all():
         return "SELL"
     return "HOLD"
