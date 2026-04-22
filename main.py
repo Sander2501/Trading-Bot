@@ -27,17 +27,19 @@ logger = logging.getLogger(__name__)
 def run_bot():
     broker = AlpacaBroker()
     logger.info("Bot started")
+    error_backoff = CHECK_INTERVAL_SECONDS
 
     while True:
         try:
-            # 1. Check if market is open
-            if not broker.is_market_open():
-                logger.info("Market is closed. Waiting...")
-                time.sleep(CHECK_INTERVAL_SECONDS)
+            # 1. Check if market is open; sleep until it opens if not
+            is_open, wait = broker.get_market_status()
+            if not is_open:
+                logger.info(f"Market is closed. Sleeping {wait:.0f}s until open.")
+                time.sleep(wait if wait > 0 else CHECK_INTERVAL_SECONDS)
                 continue
 
-            # 2. Get recent prices
-            closes = broker.get_recent_closes(SYMBOL, limit=WINDOW + 5)
+            # 2. Get recent prices (window+1 bars needed for crossover)
+            closes = broker.get_recent_closes(SYMBOL, limit=WINDOW + 1)
 
             latest_price = float(closes.iloc[-1])
             signal = moving_average_signal(closes, window=WINDOW)
@@ -66,8 +68,13 @@ def run_bot():
             else:
                 logger.info("No action")
 
+            error_backoff = CHECK_INTERVAL_SECONDS  # reset on success
+
         except Exception as e:
             logger.exception(f"Bot error: {e}")
+            time.sleep(error_backoff)
+            error_backoff = min(error_backoff * 2, 600)
+            continue
 
         time.sleep(CHECK_INTERVAL_SECONDS)
 
