@@ -201,6 +201,18 @@ class TestMovingAverageSignal:
         signal = moving_average_signal(bars)
         assert signal in {"SELL", "HOLD"}  # not BUY in a downtrend
 
+
+    def test_low_volatility_filter_returns_hold(self):
+        """If ATR%% is below min_atr_pct, strategy should HOLD."""
+        prices = [100.0 + i * 0.02 for i in range(250)]
+        bars = pd.DataFrame({
+            "c": prices,
+            "h": [p + 0.01 for p in prices],
+            "l": [p - 0.01 for p in prices],
+        })
+        signal = moving_average_signal(bars, adx_threshold=10.0, min_atr_pct=0.005)
+        assert signal == "HOLD"
+
     def test_choppy_market_hold_via_adx(self):
         """
         Oscillating prices keep ADX low, so the strategy should HOLD
