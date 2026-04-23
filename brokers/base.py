@@ -15,7 +15,7 @@ import pandas as pd
 class BaseBroker(ABC):
     """
     Minimal broker interface the bot depends on.
-    Implementations may be live (AlpacaBroker) or simulated (BacktestBroker).
+    Implementations may be live (CapitalBroker) or simulated (BacktestBroker).
     """
 
     # ------------------------------------------------------------------
@@ -23,11 +23,17 @@ class BaseBroker(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
+    def get_recent_bars(
+        self, symbol: str, limit: int, timeframe: str = "1Min"
+    ) -> pd.DataFrame:
+        """Return the most recent ``limit`` bars as a DataFrame with columns h, l, c."""
+        pass
+
     def get_recent_closes(
         self, symbol: str, limit: int, timeframe: str = "1Min"
     ) -> pd.Series:
         """Return the most recent ``limit`` closing prices as a float Series."""
-        pass
+        return self.get_recent_bars(symbol, limit, timeframe)["c"]
 
     # ------------------------------------------------------------------
     # Position queries
@@ -96,7 +102,7 @@ class BaseBroker(ABC):
         Record today's equity as the daily-loss baseline.
 
         Override in simulated brokers that maintain their own equity state
-        (e.g. BacktestBroker).  Live brokers such as AlpacaBroker can leave
+        (e.g. BacktestBroker).  Live brokers such as CapitalBroker can leave
         this as a no-op because the broker API already provides a native
         ``last_equity`` value.
         """
@@ -108,7 +114,16 @@ class BaseBroker(ABC):
 
         Called at the start of each ``run_once`` cycle.  Override in
         implementations that cache ``get_open_position`` results to avoid
-        redundant API round-trips within a single cycle (e.g. AlpacaBroker).
+        redundant API round-trips within a single cycle (e.g. CapitalBroker).
         The default is a no-op; simulated brokers read internal state directly.
         """
         pass
+
+    @property
+    def supports_shorting(self) -> bool:
+        """
+        Whether this broker can open short (sell) positions from flat.
+
+        Defaults to True for simulated brokers.
+        """
+        return True

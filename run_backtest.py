@@ -57,18 +57,27 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
             if dd > max_dd:
                 max_dd = dd
 
-    # Win rate — count profitable round-trips
-    buy_price: float | None = None
+    # Win rate — count profitable round-trips (handles long and short legs)
+    long_entry: float | None = None
+    short_entry: float | None = None
     wins = losses = 0
     for t in trades:
         if t["side"] == "BUY":
-            buy_price = t["price"]
-        elif t["side"] == "SELL" and buy_price is not None:
-            if t["price"] > buy_price:
+            long_entry = t["price"]
+        elif t["side"] == "SELL" and long_entry is not None:
+            if t["price"] > long_entry:
                 wins += 1
             else:
                 losses += 1
-            buy_price = None
+            long_entry = None
+        elif t["side"] == "SHORT":
+            short_entry = t["price"]
+        elif t["side"] == "COVER" and short_entry is not None:
+            if t["price"] < short_entry:   # profit on short = cover below entry
+                wins += 1
+            else:
+                losses += 1
+            short_entry = None
 
     total_trips = wins + losses
     win_rate = wins / total_trips * 100 if total_trips > 0 else 0.0
@@ -119,6 +128,8 @@ def main() -> None:
     final_qty = broker.get_position_qty(SYMBOL)
     if final_qty > 0:
         broker.submit_sell(SYMBOL, final_qty)
+    elif final_qty < 0:
+        broker.submit_buy(SYMBOL, abs(final_qty))
 
     m = _compute_metrics(broker)
 
@@ -134,7 +145,7 @@ def main() -> None:
         print("\nTrades:")
         for t in broker.trades:
             print(
-                f"  [{t['t']:>4}] {t['side']:<4}  {t['qty']:.6f}"
+                f"  [{t['t']:>4}] {t['side']:<5}  {t['qty']:.6f}"
                 f" @ {t['price']:>10,.2f}  equity={t['equity']:>12,.2f}"
             )
 

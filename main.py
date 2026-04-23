@@ -7,7 +7,7 @@ Run with::
 
     python main.py
 
-The bot connects to the Alpaca paper-trading API, fetches recent price bars,
+The bot connects to the Capital.com API, fetches recent price bars,
 generates an EMA-crossover + RSI signal, and submits market orders according
 to the configured risk parameters.  It runs in an infinite loop, sleeping
 ``CHECK_INTERVAL_SECONDS`` between cycles, with exponential back-off on errors.
@@ -17,7 +17,7 @@ import logging
 import time
 from datetime import date
 
-from brokers import AlpacaBroker, BaseBroker
+from brokers import CapitalBroker, BaseBroker
 from config import (
     ADX_THRESHOLD,
     ADX_WINDOW,
@@ -40,7 +40,6 @@ from config import (
     SYMBOL,
     TIMEFRAME,
     TREND_WINDOW,
-    WINDOW,
 )
 from strategy import atr_stop_distance, moving_average_signal
 
@@ -54,6 +53,11 @@ logger = logging.getLogger(__name__)
 # Track the last calendar day on which snapshot_day() was called so the
 # daily-loss baseline is refreshed exactly once per day.
 _last_snapshot_date: date | None = None
+
+# Trailing-stop watermarks, reset each time a new position is opened.
+# Long trades trail the highest price seen; short trades trail the lowest.
+_position_high: float = 0.0
+_position_low: float = float("inf")
 
 
 # ------------------------------------------------------------------
@@ -129,16 +133,15 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
 
     # Fetch enough bars for all indicators to warm up
     bars_needed = max(TREND_WINDOW, MACD_SLOW, RSI_WINDOW) * 2 + CONFIRM_BARS + 5
-    closes = broker.get_recent_closes(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
+    bars = broker.get_recent_bars(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
 
-    latest_price = float(closes.iloc[-1])
+    latest_price = float(bars["c"].iloc[-1])
     signal = moving_average_signal(
-        closes,
-        window=WINDOW,
-        confirm_bars=CONFIRM_BARS,
+        bars,
         fast_window=FAST_WINDOW,
         slow_window=SLOW_WINDOW,
         trend_window=TREND_WINDOW,
+        confirm_bars=CONFIRM_BARS,
         rsi_window=RSI_WINDOW,
         rsi_overbought=RSI_OVERBOUGHT,
         rsi_oversold=RSI_OVERSOLD,
@@ -162,18 +165,41 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
             time.sleep(CHECK_INTERVAL_SECONDS)
         return
 
-    # --- ATR-based stop-loss (floor: STOP_LOSS_PCT × entry) ---
+    # --- Trailing ATR stop-loss ---
+    # Watermarks follow price in the profitable direction so the stop moves
+    # with the trade instead of staying pinned to the entry price.
+    global _position_high, _position_low
     if current_qty > 0:
+        _position_high = max(_position_high, latest_price)
+    elif current_qty < 0:
+        _position_low = min(_position_low, latest_price)
+    else:
+        _position_high = latest_price      # pre-seed for the position about to open
+        _position_low  = latest_price
+
+    if current_qty != 0:
         entry_price = broker.get_entry_price(SYMBOL)
         if entry_price:
-            atr_stop = atr_stop_distance(closes, window=ATR_STOP_WINDOW, multiplier=ATR_STOP_MULT)
+            atr_stop = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=ATR_STOP_MULT)
             stop_floor = entry_price * STOP_LOSS_PCT
             stop_distance = max(atr_stop, stop_floor)
-            if latest_price <= entry_price - stop_distance:
-                broker.submit_sell(SYMBOL, current_qty)
+
+            # Trail from the watermark, not from entry — locks in profits on big moves
+            long_stopped  = current_qty > 0 and latest_price <= _position_high - stop_distance
+            short_stopped = current_qty < 0 and latest_price >= _position_low  + stop_distance
+
+            if long_stopped or short_stopped:
+                if current_qty > 0:
+                    broker.submit_sell(SYMBOL, current_qty)
+                    direction, ref = "long", _position_high
+                else:
+                    broker.submit_buy(SYMBOL, abs(current_qty))
+                    direction, ref = "short", _position_low
+                _position_high = latest_price
+                _position_low  = latest_price
                 logger.warning(
-                    f"STOP LOSS triggered: sold {current_qty:.6f} {SYMBOL} "
-                    f"at {latest_price:.2f} (entry {entry_price:.2f}, "
+                    f"TRAILING STOP ({direction}): closed {abs(current_qty):.6f} {SYMBOL} "
+                    f"at {latest_price:.2f} (peak/trough {ref:.2f}, "
                     f"stop_dist={stop_distance:.2f})"
                 )
                 if sleep_enabled:
@@ -182,18 +208,43 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
 
     # --- Signal execution ---
     equity, _ = broker.get_equity()
+    qty = position_size(equity, latest_price)
 
-    if signal == "BUY" and current_qty == 0:
-        qty = position_size(equity, latest_price)
-        if qty <= 0:
-            logger.info("Insufficient buying power to open a position.")
+    if signal == "BUY":
+        if current_qty > 0:
+            logger.info("Already long — holding.")
+        elif current_qty < 0:
+            # Cover short first; next cycle opens the long if signal persists
+            broker.submit_buy(SYMBOL, abs(current_qty))
+            _position_high = latest_price
+            _position_low  = latest_price
+            logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
-            broker.submit_buy(SYMBOL, qty)
-            logger.info(f"BUY  {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            if qty <= 0:
+                logger.info("Insufficient buying power to open long.")
+            else:
+                broker.submit_buy(SYMBOL, qty)
+                _position_high = latest_price
+                logger.info(f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
 
-    elif signal == "SELL" and current_qty > 0:
-        broker.submit_sell(SYMBOL, current_qty)
-        logger.info(f"SELL {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+    elif signal == "SELL":
+        if current_qty < 0:
+            logger.info("Already short — holding.")
+        elif current_qty > 0:
+            # Close long first; next cycle opens the short if signal persists
+            broker.submit_sell(SYMBOL, current_qty)
+            _position_high = latest_price
+            _position_low  = latest_price
+            logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+        else:
+            if not broker.supports_shorting:
+                logger.info("SELL signal — broker does not support shorting, staying flat.")
+            elif qty <= 0:
+                logger.info("Insufficient equity to open short.")
+            else:
+                broker.submit_sell(SYMBOL, qty)
+                _position_low = latest_price
+                logger.info(f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
 
     else:
         logger.info("No action.")
@@ -214,8 +265,11 @@ def run_bot(broker: BaseBroker | None = None) -> None:
     Accepts an optional ``broker`` argument to allow dependency injection
     (useful for testing with a BacktestBroker).
     """
-    broker = broker or AlpacaBroker()
-    logger.info("Crypto bot started.")
+    if broker is None:
+        from brokers import CapitalBroker
+        broker = CapitalBroker()
+
+    logger.info(f"Crypto bot started using {broker.__class__.__name__}.")
 
     error_backoff = CHECK_INTERVAL_SECONDS
 

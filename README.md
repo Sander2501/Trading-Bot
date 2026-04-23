@@ -1,11 +1,11 @@
 # Trading Bot
 
-A modular Python trading bot built for paper trading with Alpaca.
+A modular Python trading bot built for paper trading with Capital.com.
 
 ## Overview
 
 This project implements a simple automated trading bot that:
-- connects to Alpaca paper trading
+- connects to Capital.com paper trading
 - retrieves recent market data
 - generates trading signals using a moving average strategy
 - places paper buy/sell orders

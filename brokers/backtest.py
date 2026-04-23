@@ -3,7 +3,7 @@ brokers.backtest
 ~~~~~~~~~~~~~~~~
 Simulated broker that replays a CSV of historical price bars.
 
-Designed to be a drop-in replacement for AlpacaBroker so that the exact same
+Designed to be a drop-in replacement for CapitalBroker so that the exact same
 ``run_once`` loop from ``main.py`` can be used for both live trading and
 offline backtesting without any code changes.
 """
@@ -56,6 +56,8 @@ class BacktestBroker(BaseBroker):
             df = df.sort_values("t").reset_index(drop=True)
 
         self._closes: pd.Series = df["c"].astype(float)
+        self._highs: pd.Series = df["h"].astype(float) if "h" in df.columns else self._closes.copy()
+        self._lows:  pd.Series = df["l"].astype(float) if "l" in df.columns else self._closes.copy()
         self._symbol = symbol
         self._cursor = 0
 
@@ -95,13 +97,17 @@ class BacktestBroker(BaseBroker):
     # Market data
     # ------------------------------------------------------------------
 
-    def get_recent_closes(
-        self, symbol: str, limit: int = 30, timeframe: str = "1Min"
-    ) -> pd.Series:
+    def get_recent_bars(
+        self, symbol: str, limit: int = 30, timeframe: str = "1Min"  # noqa: ARG002
+    ) -> pd.DataFrame:
         self._check_symbol(symbol)
         end = self._cursor + 1
         start = max(0, end - limit)
-        return self._closes.iloc[start:end].reset_index(drop=True)
+        return pd.DataFrame({
+            "h": self._highs.iloc[start:end].values,
+            "l": self._lows.iloc[start:end].values,
+            "c": self._closes.iloc[start:end].values,
+        })
 
     # ------------------------------------------------------------------
     # Position queries
@@ -125,37 +131,46 @@ class BacktestBroker(BaseBroker):
 
     def submit_buy(self, symbol: str, qty: float) -> None:
         self._check_symbol(symbol)
-
         if qty <= 0:
             raise ValueError("Buy quantity must be > 0")
 
         price = self._current_price() * (1 + self._slippage_pct)
         cost = price * qty + self._commission
 
-        if cost > self._cash:
+        # Cash check only applies to opening a new long (not covering a short,
+        # because the short proceeds already sit in cash).
+        if self._qty >= 0 and cost > self._cash:
             raise ValueError(
                 f"Not enough cash to buy {qty} units at {price:.2f}. "
                 f"Cash available: {self._cash:.2f}"
             )
 
+        prev_qty = self._qty
         self._cash -= cost
-
-        # Weighted-average entry price for pyramid positions
-        if self._qty == 0:
-            self._entry_price = price
-        else:
-            total_cost = (self._entry_price or 0.0) * self._qty + cost
-            self._entry_price = total_cost / (self._qty + qty)
-
         self._qty += qty
-        self.trades.append(self._fill("BUY", qty, price))
+
+        if prev_qty > 0:
+            # Adding to an existing long — weighted average entry
+            total_cost = (self._entry_price or 0.0) * prev_qty + cost
+            self._entry_price = total_cost / self._qty
+        elif prev_qty <= 0 and self._qty > 0:
+            # Flat→long, or short cover that flipped to long
+            self._entry_price = price
+        elif self._qty == 0:
+            # Covered short entirely — now flat
+            self._entry_price = None
+        # partial short cover (prev_qty < 0, self._qty still < 0): entry unchanged
+
+        side = "COVER" if prev_qty < 0 else "BUY"
+        self.trades.append(self._fill(side, qty, price))
 
     def submit_sell(self, symbol: str, qty: float) -> None:
         self._check_symbol(symbol)
-
         if qty <= 0:
             raise ValueError("Sell quantity must be > 0")
-        if qty > self._qty:
+
+        # Cannot sell more than held when already long
+        if self._qty > 0 and qty > self._qty:
             raise ValueError(
                 f"Cannot sell {qty} units; only {self._qty} currently held."
             )
@@ -163,13 +178,20 @@ class BacktestBroker(BaseBroker):
         price = self._current_price() * (1 - self._slippage_pct)
         proceeds = price * qty - self._commission
 
+        prev_qty = self._qty
         self._cash += proceeds
         self._qty -= qty
 
-        if self._qty == 0:
+        if prev_qty == 0:
+            # Flat→short: record the short entry price
+            self._entry_price = price
+        elif self._qty == 0:
+            # Closed entire long position
             self._entry_price = None
+        # Partial long close: entry_price unchanged for the remaining position
 
-        self.trades.append(self._fill("SELL", qty, price))
+        side = "SHORT" if prev_qty == 0 else "SELL"
+        self.trades.append(self._fill(side, qty, price))
 
     # ------------------------------------------------------------------
     # Account / market status
