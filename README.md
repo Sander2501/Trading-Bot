@@ -26,3 +26,8 @@ Trading-Bot/
 ├── main.py
 ├── requirements.txt
 └── strategy.py
+
+# Run the backtest with current CSV — should complete without errors
+python backtest.py
+# After changes, run again and compare output metrics
+python backtest.py
