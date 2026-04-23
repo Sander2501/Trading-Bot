@@ -25,12 +25,15 @@ from config import (
     ATR_STOP_WINDOW,
     CHECK_INTERVAL_SECONDS,
     CONFIRM_BARS,
+    ERROR_COOLDOWN_SECONDS,
     FAST_WINDOW,
     MACD_FAST,
     MACD_SIGNAL_WINDOW,
     MACD_SLOW,
     MAX_BACKOFF_SECONDS,
+    MAX_CONSECUTIVE_ERRORS,
     MAX_DAILY_LOSS_PCT,
+    OPEN_ORDER_STALE_CYCLES,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
     RSI_WINDOW,
@@ -79,6 +82,7 @@ class TradingState:
         self.position_high: float = 0.0
         self.position_low: float = float("inf")
         self.last_snapshot_date: date | None = None
+        self.open_order_streak: int = 0
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
@@ -204,10 +208,18 @@ def run_once(
     )
 
     if open_order_exists:
+        state.open_order_streak += 1
+        if state.open_order_streak >= OPEN_ORDER_STALE_CYCLES:
+            logger.warning(
+                "Open order has persisted for %d consecutive cycles; "
+                "verify broker order state / cancel stale order if needed.",
+                state.open_order_streak,
+            )
         logger.info("Open order already exists. Skipping cycle.")
         if sleep_enabled:
             time.sleep(CHECK_INTERVAL_SECONDS)
         return
+    state.open_order_streak = 0
 
     # --- Watermark Tracking ---
     if current_qty > 0:
@@ -324,6 +336,19 @@ def run_once(
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 
+def _update_error_state(
+    consecutive_errors: int,
+    error_backoff: int,
+) -> tuple[int, int, bool]:
+    """
+    Update error counters/backoff and report whether the circuit breaker tripped.
+    """
+    next_errors = consecutive_errors + 1
+    tripped = next_errors >= MAX_CONSECUTIVE_ERRORS
+    next_backoff = min(error_backoff * 2, MAX_BACKOFF_SECONDS)
+    return next_errors, next_backoff, tripped
+
+
 # ------------------------------------------------------------------
 # Bot runner
 # ------------------------------------------------------------------
@@ -344,16 +369,30 @@ def run_bot(broker: BaseBroker | None = None) -> None:
 
     state = TradingState()
     error_backoff = CHECK_INTERVAL_SECONDS
+    consecutive_errors = 0
 
     while True:
         try:
             run_once(broker, state, sleep_enabled=True)
         except Exception as exc:
             logger.exception(f"Bot error: {exc}")
+            consecutive_errors, error_backoff, tripped = _update_error_state(
+                consecutive_errors, error_backoff
+            )
             time.sleep(error_backoff)
-            error_backoff = min(error_backoff * 2, MAX_BACKOFF_SECONDS)
+            if tripped:
+                logger.critical(
+                    "Circuit breaker tripped after %d consecutive errors; "
+                    "cooling down for %ds before resuming.",
+                    consecutive_errors,
+                    ERROR_COOLDOWN_SECONDS,
+                )
+                time.sleep(ERROR_COOLDOWN_SECONDS)
+                consecutive_errors = 0
+                error_backoff = CHECK_INTERVAL_SECONDS
             continue
 
+        consecutive_errors = 0
         error_backoff = CHECK_INTERVAL_SECONDS  # reset on successful cycle
 
 
