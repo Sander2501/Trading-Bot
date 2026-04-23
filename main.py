@@ -37,6 +37,7 @@ from config import (
     MACD_SIGNAL_WINDOW,
     MACD_SLOW,
     MAX_BACKOFF_SECONDS,
+    MIN_ATR_PCT,
     MAX_CONSECUTIVE_ERRORS,
     MAX_DAILY_LOSS_PCT,
     OPEN_ORDER_STALE_CYCLES,
@@ -358,6 +359,7 @@ def run_once(
         macd_signal=MACD_SIGNAL_WINDOW,
         adx_window=ADX_WINDOW,
         adx_threshold=ADX_THRESHOLD,
+        min_atr_pct=MIN_ATR_PCT,
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
