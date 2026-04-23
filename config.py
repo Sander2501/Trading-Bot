@@ -112,6 +112,17 @@ SLIPPAGE_PCT: float = float(os.getenv("SLIPPAGE_PCT", "0.0005"))
 #: Flat fee in USD deducted from each fill.
 COMMISSION_PER_TRADE: float = float(os.getenv("COMMISSION_PER_TRADE", "0.10"))
 
+#: Additional slippage applied in backtests as a function of intrabar range.
+#: Effective slippage ~= SLIPPAGE_PCT + BACKTEST_DYNAMIC_SLIPPAGE_K * ((h-l)/c).
+BACKTEST_DYNAMIC_SLIPPAGE_K: float = float(os.getenv("BACKTEST_DYNAMIC_SLIPPAGE_K", "0.0"))
+
+#: Simulated order latency in bars for backtests.
+BACKTEST_LATENCY_BARS: int = int(os.getenv("BACKTEST_LATENCY_BARS", "0"))
+
+#: Minimum fraction of requested quantity filled in backtests.
+#: 1.0 means full fills (legacy behaviour); lower values simulate partial fills.
+BACKTEST_PARTIAL_FILL_MIN: float = float(os.getenv("BACKTEST_PARTIAL_FILL_MIN", "1.0"))
+
 # ── Timing ────────────────────────────────────────────────────────────────────
 #: Seconds to sleep between each ``run_once`` cycle.
 CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
@@ -134,6 +145,14 @@ CSV_PATH: str = os.getenv("BACKTEST_CSV", "historical_data.csv")
 
 #: Starting cash for the simulated backtest account.
 STARTING_CASH: float = float(os.getenv("BACKTEST_STARTING_CASH", "100000"))
+
+# ── Portfolio / execution safety ──────────────────────────────────────────────
+#: Hard cap on gross position notional as a fraction of equity.
+MAX_GROSS_EXPOSURE_PCT: float = float(os.getenv("MAX_GROSS_EXPOSURE_PCT", "1.0"))
+
+#: Consecutive order submission errors before cooldown.
+MAX_ORDER_ERRORS: int = int(os.getenv("MAX_ORDER_ERRORS", "3"))
+ORDER_ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ORDER_ERROR_COOLDOWN_SECONDS", "300"))
 
 # ── State persistence ─────────────────────────────────────────────────────────
 #: Path where TradingState is persisted between cycles so the bot can recover
@@ -189,6 +208,30 @@ def validate_config() -> None:
         raise ValueError(f"ATR_STOP_MULT ({ATR_STOP_MULT}) must be > 0")
     if STARTING_CASH <= 0:
         raise ValueError(f"BACKTEST_STARTING_CASH ({STARTING_CASH}) must be > 0")
+    if BACKTEST_DYNAMIC_SLIPPAGE_K < 0:
+        raise ValueError(
+            f"BACKTEST_DYNAMIC_SLIPPAGE_K ({BACKTEST_DYNAMIC_SLIPPAGE_K}) must be >= 0"
+        )
+    if BACKTEST_LATENCY_BARS < 0:
+        raise ValueError(
+            f"BACKTEST_LATENCY_BARS ({BACKTEST_LATENCY_BARS}) must be >= 0"
+        )
+    if not (0 < BACKTEST_PARTIAL_FILL_MIN <= 1):
+        raise ValueError(
+            f"BACKTEST_PARTIAL_FILL_MIN ({BACKTEST_PARTIAL_FILL_MIN}) must be in (0, 1]"
+        )
+    if not (0 < MAX_GROSS_EXPOSURE_PCT <= 1):
+        raise ValueError(
+            f"MAX_GROSS_EXPOSURE_PCT ({MAX_GROSS_EXPOSURE_PCT}) must be in (0, 1]"
+        )
+    if MAX_ORDER_ERRORS <= 0:
+        raise ValueError(
+            f"MAX_ORDER_ERRORS ({MAX_ORDER_ERRORS}) must be > 0"
+        )
+    if ORDER_ERROR_COOLDOWN_SECONDS <= 0:
+        raise ValueError(
+            f"ORDER_ERROR_COOLDOWN_SECONDS ({ORDER_ERROR_COOLDOWN_SECONDS}) must be > 0"
+        )
     if MAX_CONSECUTIVE_ERRORS <= 0:
         raise ValueError(
             f"MAX_CONSECUTIVE_ERRORS ({MAX_CONSECUTIVE_ERRORS}) must be > 0"

@@ -171,6 +171,9 @@ The strategy uses a **triple-EMA trend filter** with **MACD**, **ADX**, and **RS
 
 **Exit logic:** ATR-based trailing stop + fixed take-profit target.
 
+> Regime note: the ADX gate is configurable via `ADX_THRESHOLD`; "TRENDING" is
+> currently tagged when `ADX > 25` in logs.
+
 ---
 
 ## Risk Profiles
@@ -306,3 +309,23 @@ pytest tests/test_strategy.py -v
 ```
 
 Tests run automatically on every push and pull request via GitHub Actions.
+
+---
+
+## Advanced Validation & Optimization
+
+### Walk-forward validation
+
+```bash
+python scripts/walk_forward.py --csv historical_data.csv --train-bars 8000 --test-bars 4000
+```
+
+Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD plus averages.
+
+### Parameter robustness sweep
+
+```bash
+python scripts/sweep_params.py
+```
+
+Produces `sweep_report.json` with ranked parameter combinations.

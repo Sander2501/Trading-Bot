@@ -51,6 +51,9 @@ class BacktestBroker(BaseBroker):
         starting_cash: float = 100_000.0,
         slippage_pct: float = 0.0005,
         commission_per_trade: float = 0.0,
+        dynamic_slippage_k: float = 0.0,
+        latency_bars: int = 0,
+        partial_fill_min: float = 1.0,
     ) -> None:
         if starting_cash <= 0:
             raise ValueError(
@@ -63,6 +66,18 @@ class BacktestBroker(BaseBroker):
         if commission_per_trade < 0:
             raise ValueError(
                 f"commission_per_trade must be >= 0, got {commission_per_trade}"
+            )
+        if dynamic_slippage_k < 0:
+            raise ValueError(
+                f"dynamic_slippage_k must be >= 0, got {dynamic_slippage_k}"
+            )
+        if latency_bars < 0:
+            raise ValueError(
+                f"latency_bars must be >= 0, got {latency_bars}"
+            )
+        if partial_fill_min <= 0 or partial_fill_min > 1:
+            raise ValueError(
+                f"partial_fill_min must be in (0, 1], got {partial_fill_min}"
             )
 
         df = pd.read_csv(csv_path)
@@ -90,7 +105,11 @@ class BacktestBroker(BaseBroker):
         self._last_equity: float = starting_cash
 
         self._slippage_pct = slippage_pct
+        self._dynamic_slippage_k = dynamic_slippage_k
         self._commission = commission_per_trade
+        self._latency_bars = latency_bars
+        self._partial_fill_min = partial_fill_min
+        self._pending_orders: list[dict] = []
 
         # Pending standing orders (set when a position is opened with SL/TP).
         self._sl_price: float | None = None
@@ -114,6 +133,7 @@ class BacktestBroker(BaseBroker):
         """
         self.equity_curve.append(self._equity())
         self._cursor += 1
+        self._process_pending_orders()
         if self._qty != 0 and self._cursor < len(self._closes):
             self._check_sl_tp()
         return self._cursor < len(self._closes)
@@ -156,14 +176,29 @@ class BacktestBroker(BaseBroker):
 
     def has_open_order(self, symbol: str) -> bool:
         self._check_symbol(symbol)
-        return False  # simulated orders fill instantly
+        return len(self._pending_orders) > 0
 
     def submit_buy(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
         self._check_symbol(symbol)
         if qty <= 0:
             raise ValueError("Buy quantity must be > 0")
+        if self._latency_bars > 0:
+            self._pending_orders.append({
+                "side": "BUY",
+                "qty": qty,
+                "sl": sl,
+                "tp": tp,
+                "execute_at": self._cursor + self._latency_bars,
+            })
+            return
+        self._execute_buy(qty, sl=sl, tp=tp)
 
-        price = self._current_price() * (1 + self._slippage_pct)
+    def _execute_buy(self, qty: float, sl: float | None = None, tp: float | None = None) -> None:
+        qty = self._apply_partial_fill(qty)
+        if qty <= 0:
+            return
+
+        price = self._current_price() * (1 + self._effective_slippage())
         cost = price * qty + self._commission
 
         # Reject orders where the total cost exceeds available cash and there
@@ -205,6 +240,21 @@ class BacktestBroker(BaseBroker):
         self._check_symbol(symbol)
         if qty <= 0:
             raise ValueError("Sell quantity must be > 0")
+        if self._latency_bars > 0:
+            self._pending_orders.append({
+                "side": "SELL",
+                "qty": qty,
+                "sl": sl,
+                "tp": tp,
+                "execute_at": self._cursor + self._latency_bars,
+            })
+            return
+        self._execute_sell(qty, sl=sl, tp=tp)
+
+    def _execute_sell(self, qty: float, sl: float | None = None, tp: float | None = None) -> None:
+        qty = self._apply_partial_fill(qty)
+        if qty <= 0:
+            return
 
         # Cannot sell more than held when already long
         if self._qty > 0 and qty > self._qty:
@@ -212,7 +262,7 @@ class BacktestBroker(BaseBroker):
                 f"Cannot sell {qty} units; only {self._qty} currently held."
             )
 
-        price = self._current_price() * (1 - self._slippage_pct)
+        price = self._current_price() * (1 - self._effective_slippage())
         proceeds = price * qty - self._commission
 
         prev_qty = self._qty
@@ -272,6 +322,45 @@ class BacktestBroker(BaseBroker):
     def _current_price(self) -> float:
         idx = min(self._cursor, len(self._closes) - 1)
         return float(self._closes.iloc[idx])
+
+    def _effective_slippage(self) -> float:
+        base = self._slippage_pct
+        if self._cursor >= len(self._closes):
+            return base
+        close = float(self._closes.iloc[self._cursor])
+        high = float(self._highs.iloc[self._cursor])
+        low = float(self._lows.iloc[self._cursor])
+        if close <= 0:
+            return base
+        bar_range_pct = max(0.0, (high - low) / close)
+        return base + self._dynamic_slippage_k * bar_range_pct
+
+    def _apply_partial_fill(self, qty: float) -> float:
+        if self._partial_fill_min >= 1:
+            return qty
+        close = max(self._current_price(), 1e-9)
+        high = float(self._highs.iloc[self._cursor])
+        low = float(self._lows.iloc[self._cursor])
+        bar_range_pct = max(0.0, (high - low) / close)
+        # Deterministic fill model: fuller fills on higher-vol bars.
+        ratio = self._partial_fill_min + (1 - self._partial_fill_min) * min(1.0, bar_range_pct / 0.01)
+        return qty * ratio
+
+    def _process_pending_orders(self) -> None:
+        if not self._pending_orders:
+            return
+        due, future = [], []
+        for order in self._pending_orders:
+            if order["execute_at"] <= self._cursor:
+                due.append(order)
+            else:
+                future.append(order)
+        self._pending_orders = future
+        for order in due:
+            if order["side"] == "BUY":
+                self._execute_buy(order["qty"], sl=order["sl"], tp=order["tp"])
+            else:
+                self._execute_sell(order["qty"], sl=order["sl"], tp=order["tp"])
 
     def _equity(self) -> float:
         return self._cash + self._qty * self._current_price()

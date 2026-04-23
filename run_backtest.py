@@ -18,7 +18,17 @@ from collections import deque
 from datetime import datetime, timezone
 
 from brokers import BacktestBroker
-from config import CSV_PATH, STARTING_CASH, SYMBOL, SLIPPAGE_PCT, COMMISSION_PER_TRADE
+from config import (
+    BACKTEST_DYNAMIC_SLIPPAGE_K,
+    BACKTEST_LATENCY_BARS,
+    BACKTEST_PARTIAL_FILL_MIN,
+    COMMISSION_PER_TRADE,
+    CSV_PATH,
+    SLIPPAGE_PCT,
+    STARTING_CASH,
+    SYMBOL,
+    TIMEFRAME,
+)
 from main import TradingState, run_once
 
 
@@ -109,7 +119,21 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     profit_factor = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else float('inf')
 
-    # Annualised Sharpe (rf = 0, assumes 1-min bars, crypto trades 24/7)
+    # Annualised Sharpe (rf = 0). Bars/year are derived from configured timeframe.
+    def _bars_per_year(timeframe: str) -> int:
+        tf = timeframe.strip()
+        mapping = {
+            "1Min": 365 * 24 * 60,
+            "5Min": 365 * 24 * 12,
+            "15Min": 365 * 24 * 4,
+            "30Min": 365 * 24 * 2,
+            "1H": 365 * 24,
+            "4H": 365 * 6,
+            "1D": 365,
+            "1W": 52,
+        }
+        return mapping.get(tf, 365 * 24 * 4)  # default to 15Min
+
     sharpe = 0.0
     if len(equity_curve) > 1:
         bar_returns = [
@@ -120,7 +144,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         if len(bar_returns) > 1:
             std_r = statistics.stdev(bar_returns)
             if std_r > 0:
-                bars_per_year = 365 * 1440  # calendar days × 1-min bars/day (24/7)
+                bars_per_year = _bars_per_year(TIMEFRAME)
                 sharpe = statistics.mean(bar_returns) / std_r * (bars_per_year**0.5)
 
     return {
@@ -141,13 +165,19 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
 # ------------------------------------------------------------------
 
 
-def main() -> None:
+def run_backtest_for_csv(
+    csv_path: str,
+    starting_cash: float = STARTING_CASH,
+) -> tuple[BacktestBroker, dict]:
     broker = BacktestBroker(
-        csv_path=CSV_PATH,
+        csv_path=csv_path,
         symbol=SYMBOL,
-        starting_cash=STARTING_CASH,
+        starting_cash=starting_cash,
         slippage_pct=SLIPPAGE_PCT,
         commission_per_trade=COMMISSION_PER_TRADE,
+        dynamic_slippage_k=BACKTEST_DYNAMIC_SLIPPAGE_K,
+        latency_bars=BACKTEST_LATENCY_BARS,
+        partial_fill_min=BACKTEST_PARTIAL_FILL_MIN,
     )
 
     # A single persistent state is essential — previously a fresh TradingState
@@ -167,6 +197,11 @@ def main() -> None:
         broker.submit_buy(SYMBOL, abs(final_qty))
 
     m = _compute_metrics(broker)
+    return broker, m
+
+
+def main() -> None:
+    broker, m = run_backtest_for_csv(CSV_PATH, starting_cash=STARTING_CASH)
 
     print("\n" + "="*40)
     print("       BACKTEST PERFORMANCE       ")
