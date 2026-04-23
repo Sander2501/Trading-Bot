@@ -86,6 +86,10 @@ class BacktestBroker(BaseBroker):
         self._slippage_pct = slippage_pct
         self._commission = commission_per_trade
 
+        # Pending standing orders (set when a position is opened with SL/TP).
+        self._sl_price: float | None = None
+        self._tp_price: float | None = None
+
         #: All fills recorded during the run.
         self.trades: list[dict] = []
 
@@ -98,11 +102,14 @@ class BacktestBroker(BaseBroker):
 
     def advance(self) -> bool:
         """
-        Snapshot equity for the current bar then move the cursor forward.
+        Snapshot equity for the current bar, move the cursor forward, then
+        simulate any standing SL/TP orders against the new bar's high/low.
         Returns ``True`` while more bars remain.
         """
         self.equity_curve.append(self._equity())
         self._cursor += 1
+        if self._qty != 0 and self._cursor < len(self._closes):
+            self._check_sl_tp()
         return self._cursor < len(self._closes)
 
     def done(self) -> bool:
@@ -177,6 +184,14 @@ class BacktestBroker(BaseBroker):
             self._entry_price = None
         # partial short cover (prev_qty < 0, self._qty still < 0): entry unchanged
 
+        # Store pending standing orders for the new long, clear on cover/close.
+        if self._qty > 0:
+            self._sl_price = sl
+            self._tp_price = tp
+        else:
+            self._sl_price = None
+            self._tp_price = None
+
         side = "COVER" if prev_qty < 0 else "BUY"
         self.trades.append(self._fill(side, qty, price))
 
@@ -205,6 +220,14 @@ class BacktestBroker(BaseBroker):
             # Closed entire long position
             self._entry_price = None
         # Partial long close: entry_price unchanged for the remaining position
+
+        # Store pending standing orders for the new short, clear on close.
+        if self._qty < 0:
+            self._sl_price = sl
+            self._tp_price = tp
+        else:
+            self._sl_price = None
+            self._tp_price = None
 
         side = "SHORT" if prev_qty == 0 else "SELL"
         self.trades.append(self._fill(side, qty, price))
@@ -245,6 +268,62 @@ class BacktestBroker(BaseBroker):
             "t": self._cursor,
             "equity": self._equity(),
         }
+
+    def _check_sl_tp(self) -> None:
+        """Simulate standing SL/TP orders against the current bar's high/low.
+
+        Called from :meth:`advance` after the cursor moves to a new bar.
+        SL takes priority over TP when both are hit on the same bar (worst-case
+        assumption is more conservative for backtesting purposes).
+        """
+        if self._sl_price is None and self._tp_price is None:
+            return
+
+        high = float(self._highs.iloc[self._cursor])
+        low  = float(self._lows.iloc[self._cursor])
+        qty  = abs(self._qty)
+
+        if self._qty > 0:  # Long position
+            sl_hit = self._sl_price is not None and low  <= self._sl_price
+            tp_hit = self._tp_price is not None and high >= self._tp_price
+            if sl_hit:
+                fill = self._sl_price
+                self._close_position_at(fill, qty, "SL_STOP")
+                logger.info("SL triggered on long @ %.4f", fill)
+            elif tp_hit:
+                fill = self._tp_price
+                self._close_position_at(fill, qty, "TP_STOP")
+                logger.info("TP triggered on long @ %.4f", fill)
+
+        elif self._qty < 0:  # Short position
+            sl_hit = self._sl_price is not None and high >= self._sl_price
+            tp_hit = self._tp_price is not None and low  <= self._tp_price
+            if sl_hit:
+                fill = self._sl_price
+                self._cover_position_at(fill, qty, "SL_STOP")
+                logger.info("SL triggered on short @ %.4f", fill)
+            elif tp_hit:
+                fill = self._tp_price
+                self._cover_position_at(fill, qty, "TP_STOP")
+                logger.info("TP triggered on short @ %.4f", fill)
+
+    def _close_position_at(self, price: float, qty: float, side: str) -> None:
+        """Close a long position at an exact price (SL/TP fill, no slippage)."""
+        self._cash += price * qty - self._commission
+        self._qty = 0.0
+        self._entry_price = None
+        self._sl_price = None
+        self._tp_price = None
+        self.trades.append(self._fill(side, qty, price))
+
+    def _cover_position_at(self, price: float, qty: float, side: str) -> None:
+        """Cover a short position at an exact price (SL/TP fill, no slippage)."""
+        self._cash -= price * qty + self._commission
+        self._qty = 0.0
+        self._entry_price = None
+        self._sl_price = None
+        self._tp_price = None
+        self.trades.append(self._fill(side, qty, price))
 
     def _check_symbol(self, symbol: str) -> None:
         if symbol != self._symbol:

@@ -71,7 +71,7 @@ def moving_average_signal(
     fast_window: int = 9,
     slow_window: int = 21,
     trend_window: int = 50,
-    confirm_bars: int = 1,  # Reduced from 2 to decrease lag
+    confirm_bars: int = 2,
     rsi_window: int = 14,
     rsi_overbought: float = 70.0,
     rsi_oversold: float = 30.0,
@@ -82,22 +82,24 @@ def moving_average_signal(
     adx_threshold: float = 20.0,
 ) -> str:
     """
-    Upgraded strategy with Market Regime Filter and RSI Entry Timing.
+    Strategy with Market Regime Filter, RSI Entry Timing, and confirmed crossovers.
 
     Regimes:
-    1. TRENDING (ADX > 25): Follow EMA crossovers with MACD confirmation + RSI timing.
-    2. RANGING (ADX between 20-25): Use RSI pullbacks within the major trend.
-    3. SIDEWAYS (ADX < 20): Stay flat to avoid chop (User requested filter).
+    1. TRENDING (ADX > 25): Follow EMA crossovers with MACD + RSI confirmation.
+    2. RANGING (ADX 20-25): Use RSI mean-reversion within the trend.
+    3. SIDEWAYS (ADX < threshold): Stay flat.
 
-    Note on ``confirm_bars``:
-    ``confirm_bars`` still affects warm-up requirements and can reduce noisy entries,
-    but the "early crossover" branch is intentionally allowed to trigger before
-    full confirmation in strong reversal conditions.
+    ``confirm_bars`` controls how many consecutive bars the fast/slow EMA
+    crossover must have been in place before a signal fires.  A value of 2
+    means the crossover must have held for at least 2 bars (current bar + one
+    preceding bar) while the bar before that was on the opposite side.  This
+    eliminates single-bar false crossovers without adding meaningful lag.
     """
     closes = bars["c"]
     highs  = bars["h"]
     lows   = bars["l"]
 
+    # Need confirm_bars + 1 extra to check the bar before the crossover
     min_bars = max(trend_window, macd_slow, rsi_window) + confirm_bars + 5
     if len(closes) < min_bars:
         return "HOLD"
@@ -115,14 +117,11 @@ def moving_average_signal(
     _, _, macd_hist = _macd(closes, macd_fast, macd_slow, macd_signal)
     adx = _adx(highs, lows, closes, adx_window)
 
-    # 1. Market Regime Filter (BIG UPGRADE)
-    # Filter out non-trending markets to avoid chop
     if adx < adx_threshold:
         logger.info("REGIME: SIDEWAYS (ADX %.1f < %d) | Skipping.", adx, adx_threshold)
         return "HOLD"
-    
-    # 2. Detect Primary Trend
-    trend = "BULL" if latest_close > curr_trend else "BEAR"
+
+    trend  = "BULL" if latest_close > curr_trend else "BEAR"
     regime = "TRENDING" if adx > 25 else "RANGING"
 
     logger.info(
@@ -130,44 +129,54 @@ def moving_average_signal(
         regime, trend, curr_fast, curr_slow, curr_trend, rsi, macd_hist, adx,
     )
 
-    # 3. Signal Logic (Improved Entries + RSI Timing)
-    
-    # BULLISH ENTRIES
+    # Helpers: check that the crossover has been held for confirm_bars bars and
+    # that the bar before that was on the opposite side (fresh crossover).
+    def _bull_crossover_confirmed() -> bool:
+        held = all(
+            float(fast_ema.iloc[-(i + 1)]) > float(slow_ema.iloc[-(i + 1)])
+            for i in range(confirm_bars)
+        )
+        was_below = float(fast_ema.iloc[-(confirm_bars + 1)]) <= float(slow_ema.iloc[-(confirm_bars + 1)])
+        return held and was_below
+
+    def _bear_crossover_confirmed() -> bool:
+        held = all(
+            float(fast_ema.iloc[-(i + 1)]) < float(slow_ema.iloc[-(i + 1)])
+            for i in range(confirm_bars)
+        )
+        was_above = float(fast_ema.iloc[-(confirm_bars + 1)]) >= float(slow_ema.iloc[-(confirm_bars + 1)])
+        return held and was_above
+
     if trend == "BULL":
-        # Trending: Fast EMA above Slow EMA + MACD positive + RSI DIP
-        # Ranging: Just RSI DIP
-        is_ema_bull = curr_fast > curr_slow
+        is_ema_bull  = curr_fast > curr_slow
         is_macd_bull = macd_hist > 0
-        is_rsi_dip = rsi < 45  # Entry timing: Buy the dip in an uptrend
-        
+        is_rsi_dip   = rsi < 45
+
         if regime == "TRENDING":
             if is_ema_bull and is_macd_bull and is_rsi_dip:
                 logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Dip)")
                 return "BUY"
-            # Early Entry: EMA Crossover without waiting for confirmation bars
-            if curr_fast > curr_slow and float(fast_ema.iloc[-2]) <= float(slow_ema.iloc[-2]):
-                logger.info("SIGNAL: EARLY CROSSOVER BUY")
+            if _bull_crossover_confirmed():
+                logger.info("SIGNAL: CONFIRMED CROSSOVER BUY (%d bars)", confirm_bars)
                 return "BUY"
-        else: # RANGING
+        else:
             if rsi <= rsi_oversold:
                 logger.info("SIGNAL: RSI OVERSOLD BUY (Ranging)")
                 return "BUY"
 
-    # BEARISH ENTRIES
     elif trend == "BEAR":
-        is_ema_bear = curr_fast < curr_slow
+        is_ema_bear  = curr_fast < curr_slow
         is_macd_bear = macd_hist < 0
-        is_rsi_spike = rsi > 55  # Entry timing: Sell the spike in a downtrend
-        
+        is_rsi_spike = rsi > 55
+
         if regime == "TRENDING":
             if is_ema_bear and is_macd_bear and is_rsi_spike:
                 logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Spike)")
                 return "SELL"
-            # Early Entry: EMA Crossover
-            if curr_fast < curr_slow and float(fast_ema.iloc[-2]) >= float(slow_ema.iloc[-2]):
-                logger.info("SIGNAL: EARLY CROSSOVER SELL")
+            if _bear_crossover_confirmed():
+                logger.info("SIGNAL: CONFIRMED CROSSOVER SELL (%d bars)", confirm_bars)
                 return "SELL"
-        else: # RANGING
+        else:
             if rsi >= rsi_overbought:
                 logger.info("SIGNAL: RSI OVERBOUGHT SELL (Ranging)")
                 return "SELL"
