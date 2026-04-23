@@ -66,6 +66,15 @@ pytest -q
 python run_backtest.py
 ```
 
+### One-command setup (recommended)
+
+Use the helper script to create `.venv`, install pinned dependencies, and verify
+core imports:
+
+```bash
+./scripts/dev_setup.sh
+```
+
 ---
 
 ## Environment Variables
@@ -82,6 +91,11 @@ Copy `.env.example` to `.env` and edit the values:
 | `SYMBOL` | `BTC/USD` | Trading symbol |
 | `TIMEFRAME` | `1Min` | Bar timeframe |
 | `RISK_PER_TRADE` | `0.02` | Fraction of equity per trade (see Risk Profiles) |
+| `MAX_CONSECUTIVE_ERRORS` | `5` | Consecutive bot-cycle errors before cooldown circuit breaker |
+| `ERROR_COOLDOWN_SECONDS` | `900` | Cooldown duration after circuit breaker trips |
+| `OPEN_ORDER_STALE_CYCLES` | `5` | Warn if open orders persist for N consecutive cycles |
+| `METRICS_LOG_PATH` | `bot_metrics.jsonl` | Path to per-cycle structured metrics/event log (JSONL) |
+| `METRICS_HEARTBEAT_CYCLES` | `10` | Emit heartbeat summary log every N cycles |
 | `BACKTEST_CSV` | `historical_data.csv` | Path to historical CSV for backtesting |
 | `BACKTEST_STARTING_CASH` | `100000` | Starting account balance for backtests |
 
@@ -237,6 +251,12 @@ python run_backtest.py
 ## Running Tests
 
 ```bash
+# Ensure env + deps first (safe to re-run)
+./scripts/dev_setup.sh
+
+# One-command test runner (auto-creates .venv if missing)
+./scripts/run_tests.sh
+
 # Run all tests (fast)
 pytest -q
 
