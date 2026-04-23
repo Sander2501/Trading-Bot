@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 
 from brokers import BacktestBroker
 from config import CSV_PATH, STARTING_CASH, SYMBOL, SLIPPAGE_PCT, COMMISSION_PER_TRADE
-from main import run_once
+from main import TradingState, run_once
 
 
 # ------------------------------------------------------------------
@@ -146,9 +146,14 @@ def main() -> None:
         commission_per_trade=COMMISSION_PER_TRADE,
     )
 
+    # A single persistent state is essential — previously a fresh TradingState
+    # was created on every cycle, which reset the daily-loss baseline every
+    # cycle (halt never tripped) and wiped trailing-stop watermarks.
+    state = TradingState()
+
     # Replay every bar through the same run_once logic used in live trading.
     while not broker.done():
-        run_once(broker, sleep_enabled=False)
+        run_once(broker, state=state, sleep_enabled=False)
         broker.advance()
 
     final_qty = broker.get_position_qty(SYMBOL)

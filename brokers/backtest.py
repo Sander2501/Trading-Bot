@@ -9,6 +9,8 @@ offline backtesting without any code changes.
 """
 
 import logging
+from datetime import date
+
 import pandas as pd
 
 from brokers.base import BaseBroker
@@ -70,6 +72,10 @@ class BacktestBroker(BaseBroker):
 
         if "t" in df.columns:
             df = df.sort_values("t").reset_index(drop=True)
+            # Parse timestamps once so current_date() is cheap per cycle.
+            self._timestamps: pd.Series | None = pd.to_datetime(df["t"], utc=True, errors="coerce")
+        else:
+            self._timestamps = None
 
         self._closes: pd.Series = df["c"].astype(float)
         self._highs: pd.Series = df["h"].astype(float) if "h" in df.columns else self._closes.copy()
@@ -248,6 +254,16 @@ class BacktestBroker(BaseBroker):
     def snapshot_day(self) -> None:
         """Record current equity as the daily-loss baseline."""
         self._last_equity = self._equity()
+
+    def current_date(self) -> date:
+        """Return the date of the current bar so daily-loss rolls over per simulated day."""
+        if self._timestamps is None:
+            return date.today()
+        idx = min(self._cursor, len(self._timestamps) - 1)
+        ts = self._timestamps.iloc[idx]
+        if pd.isna(ts):
+            return date.today()
+        return ts.date()
 
     # ------------------------------------------------------------------
     # Private helpers

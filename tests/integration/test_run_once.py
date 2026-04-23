@@ -214,6 +214,115 @@ def test_trading_state_load_missing_file(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Daily-loss halt + bar-date rollover
+# ---------------------------------------------------------------------------
+
+
+def test_daily_loss_halt_uses_bar_date(tmp_path, monkeypatch):
+    """Baseline must refresh when the bar-date changes, not the wall-clock date."""
+    from datetime import datetime, timedelta, timezone
+
+    import main
+
+    # 10 bars on day 1, 10 bars on day 2.  Price is irrelevant to this check.
+    base = datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)
+    timestamps = [(base + timedelta(minutes=i)).isoformat() for i in range(10)] + [
+        (base + timedelta(days=1, minutes=i)).isoformat() for i in range(10)
+    ]
+    df = pd.DataFrame({"t": timestamps, "c": [100.0] * 20, "h": [100.0] * 20, "l": [100.0] * 20})
+    csv = tmp_path / "two_days.csv"
+    df.to_csv(csv, index=False)
+
+    broker = BacktestBroker(csv_path=str(csv), symbol="BTC/USD", starting_cash=100_000.0)
+    state = TradingState()
+
+    # Cycle 1 of day 1 → baseline snapshot taken for day 1.
+    run_once(broker, state=state, sleep_enabled=False)
+    day1 = state.last_snapshot_date
+
+    # Advance to the middle of day 2.
+    for _ in range(15):
+        broker.advance()
+
+    # Patch wall-clock so date.today() would NOT roll over — proves the fix
+    # relies on the bar's date, not the wall clock.
+    class _FrozenDate:
+        @classmethod
+        def today(cls):
+            return day1
+
+    monkeypatch.setattr(main, "date", _FrozenDate)
+
+    run_once(broker, state=state, sleep_enabled=False)
+    assert state.last_snapshot_date != day1, (
+        "Baseline should roll over based on bar-date, independent of wall clock."
+    )
+
+
+def test_daily_loss_halt_prevents_new_entries(tmp_path, monkeypatch):
+    """When equity drops below the daily-loss threshold, run_once must not open positions."""
+    import main
+
+    broker = _make_broker(tmp_path, [100.0 + i * 0.5 for i in range(200)])
+    state = TradingState()
+
+    # First cycle: takes the baseline snapshot at $100k equity.
+    run_once(broker, state=state, sleep_enabled=False)
+    broker.advance()
+
+    # Force broker equity to report a large drawdown (5%) without actually trading.
+    monkeypatch.setattr(broker, "get_equity", lambda: (95_000.0, 100_000.0))
+
+    prev_trades = len(broker.trades)
+    for _ in range(10):
+        run_once(broker, state=state, sleep_enabled=False)
+        broker.advance()
+
+    assert len(broker.trades) == prev_trades, (
+        "Daily-loss halt must block new fills while equity is below the threshold."
+    )
+
+
+# ---------------------------------------------------------------------------
+# ALLOW_SHORTS flag
+# ---------------------------------------------------------------------------
+
+
+def test_shorts_disabled_keeps_bot_flat_on_sell(downtrend_broker, monkeypatch):
+    """With ALLOW_SHORTS=False, a SELL signal from flat must NOT open a short."""
+    import main
+
+    monkeypatch.setattr(main, "ALLOW_SHORTS", False)
+
+    broker = downtrend_broker
+    state = TradingState()
+    while not broker.done():
+        run_once(broker, state=state, sleep_enabled=False)
+        broker.advance()
+
+    assert all(t["side"] != "SHORT" for t in broker.trades), (
+        "No SHORT fills should occur when ALLOW_SHORTS is False."
+    )
+
+
+def test_shorts_enabled_opens_short_on_sell_signal(tmp_path, monkeypatch):
+    """With ALLOW_SHORTS=True, a SELL signal from flat must open a short."""
+    import main
+
+    broker = _make_broker(tmp_path, [100.0 + i * 0.01 for i in range(200)])
+    monkeypatch.setattr(main, "ALLOW_SHORTS", True)
+    # Force a SELL signal so the test isolates the ALLOW_SHORTS branch.
+    monkeypatch.setattr(main, "moving_average_signal", lambda *a, **k: "SELL")
+
+    state = TradingState()
+    run_once(broker, state=state, sleep_enabled=False)
+
+    assert len(broker.trades) == 1 and broker.trades[0]["side"] == "SHORT", (
+        "A forced SELL signal with ALLOW_SHORTS=True should produce exactly one SHORT fill."
+    )
+
+
 def test_dry_run_broker_no_fills(tmp_path, capsys):
     """DryRunBroker must log order intent but not change position."""
     from main import DryRunBroker
