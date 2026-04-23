@@ -29,39 +29,60 @@ logger = logging.getLogger(__name__)
 
 
 def position_size(buying_power: float, price: float) -> int:
+    """
+    Simple sizing rule:
+    allocate RISK_PER_TRADE fraction of buying power to a new position.
+    """
     if price <= 0:
         return 0
-    return max(1, int(buying_power * RISK_PER_TRADE / price))
+
+    qty = int((buying_power * RISK_PER_TRADE) / price)
+
+    if buying_power < price:
+        return 0
+
+    return max(1, qty)
 
 
 def daily_loss_exceeded(broker: BaseBroker) -> bool:
     equity, last_equity = broker.get_equity()
+
     if last_equity <= 0:
         return False
+
     drawdown = (last_equity - equity) / last_equity
     return drawdown >= MAX_DAILY_LOSS_PCT
 
 
-def run_once(broker: BaseBroker) -> None:
+def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
     is_open, wait = broker.get_market_status()
+
     if not is_open:
         logger.info(f"Market is closed. Sleeping {wait:.0f}s until open.")
-        time.sleep(wait if wait > 0 else CHECK_INTERVAL_SECONDS)
+        if sleep_enabled:
+            time.sleep(wait if wait > 0 else CHECK_INTERVAL_SECONDS)
         return
 
     if daily_loss_exceeded(broker):
         logger.warning(
             f"Daily loss limit ({MAX_DAILY_LOSS_PCT:.1%}) reached. Halting for the day."
         )
-        # Sleep an hour; the next cycle will re-check and resume after reset.
-        time.sleep(3600)
+        if sleep_enabled:
+            time.sleep(3600)
         return
 
     closes = broker.get_recent_closes(
-        SYMBOL, limit=WINDOW + CONFIRM_BARS, timeframe=TIMEFRAME
+        SYMBOL,
+        limit=WINDOW + CONFIRM_BARS,
+        timeframe=TIMEFRAME,
     )
+
     latest_price = float(closes.iloc[-1])
-    signal = moving_average_signal(closes, window=WINDOW, confirm_bars=CONFIRM_BARS)
+    signal = moving_average_signal(
+        closes,
+        window=WINDOW,
+        confirm_bars=CONFIRM_BARS,
+    )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
 
@@ -72,49 +93,58 @@ def run_once(broker: BaseBroker) -> None:
 
     if open_order_exists:
         logger.info("Open order already exists. No new action.")
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        if sleep_enabled:
+            time.sleep(CHECK_INTERVAL_SECONDS)
         return
 
+    # Stop loss
     if current_qty > 0:
         entry_price = broker.get_entry_price(SYMBOL)
-        if entry_price and latest_price <= entry_price * (1 - STOP_LOSS_PCT):
+        if entry_price is not None and latest_price <= entry_price * (1 - STOP_LOSS_PCT):
             broker.submit_sell(SYMBOL, current_qty)
             logger.warning(
                 f"STOP LOSS: sold {current_qty} {SYMBOL} at {latest_price:.2f} "
                 f"(entry {entry_price:.2f})"
             )
-            time.sleep(CHECK_INTERVAL_SECONDS)
+            if sleep_enabled:
+                time.sleep(CHECK_INTERVAL_SECONDS)
             return
 
     if signal == "BUY" and current_qty == 0:
         qty = position_size(broker.get_buying_power(), latest_price)
+
         if qty <= 0:
             logger.info("Insufficient buying power to open a position.")
         else:
             broker.submit_buy(SYMBOL, qty)
             logger.info(f"BUY sent for {qty} share(s) of {SYMBOL}")
+
     elif signal == "SELL" and current_qty > 0:
         broker.submit_sell(SYMBOL, current_qty)
         logger.info(f"SELL sent for {current_qty} share(s) of {SYMBOL}")
+
     else:
         logger.info("No action")
 
-    time.sleep(CHECK_INTERVAL_SECONDS)
+    if sleep_enabled:
+        time.sleep(CHECK_INTERVAL_SECONDS)
 
 
 def run_bot(broker: BaseBroker | None = None) -> None:
     broker = broker or AlpacaBroker()
     logger.info("Bot started")
+
     error_backoff = CHECK_INTERVAL_SECONDS
 
     while True:
         try:
-            run_once(broker)
+            run_once(broker, sleep_enabled=True)
         except Exception as e:
             logger.exception(f"Bot error: {e}")
             time.sleep(error_backoff)
             error_backoff = min(error_backoff * 2, MAX_BACKOFF_SECONDS)
             continue
+
         error_backoff = CHECK_INTERVAL_SECONDS
 
 
