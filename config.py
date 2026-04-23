@@ -112,6 +112,11 @@ CSV_PATH: str = os.getenv("BACKTEST_CSV", "historical_data.csv")
 #: Starting cash for the simulated backtest account.
 STARTING_CASH: float = float(os.getenv("BACKTEST_STARTING_CASH", "100000"))
 
+# ── State persistence ─────────────────────────────────────────────────────────
+#: Path where TradingState is persisted between cycles so the bot can recover
+#: trailing stop watermarks after a crash or restart.
+STATE_FILE: str = os.getenv("STATE_FILE", "bot_state.json")
+
 
 # ── Validation ────────────────────────────────────────────────────────────────
 

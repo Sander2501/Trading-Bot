@@ -15,7 +15,7 @@ performance report and saves ``backtest_report.json``.
 import json
 import statistics
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 
 from brokers import BacktestBroker
 from config import CSV_PATH, STARTING_CASH, SYMBOL, SLIPPAGE_PCT, COMMISSION_PER_TRADE
@@ -105,7 +105,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     profit_factor = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else float('inf')
 
-    # Annualised Sharpe (rf = 0, assumes 1-min bars, 252 trading days)
+    # Annualised Sharpe (rf = 0, assumes 1-min bars, crypto trades 24/7)
     sharpe = 0.0
     if len(equity_curve) > 1:
         bar_returns = [
@@ -116,7 +116,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         if len(bar_returns) > 1:
             std_r = statistics.stdev(bar_returns)
             if std_r > 0:
-                bars_per_year = 252 * 390  # trading days × 1-min bars/day
+                bars_per_year = 365 * 1440  # calendar days × 1-min bars/day (24/7)
                 sharpe = statistics.mean(bar_returns) / std_r * (bars_per_year**0.5)
 
     return {
@@ -193,7 +193,7 @@ def main() -> None:
         return v
 
     report = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "starting_cash": STARTING_CASH,
         **{k: _safe(v) for k, v in m.items()},
     }

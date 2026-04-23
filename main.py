@@ -5,7 +5,8 @@ Live trading entry-point.
 
 Run with::
 
-    python main.py
+    python main.py           # live/demo trading
+    python main.py --dry-run # log orders without sending them
 
 The bot connects to the Capital.com API, fetches recent price bars,
 generates an EMA-crossover + RSI signal, and submits market orders according
@@ -13,9 +14,13 @@ to the configured risk parameters.  It runs in an infinite loop, sleeping
 ``CHECK_INTERVAL_SECONDS`` between cycles, with exponential back-off on errors.
 """
 
+import argparse
+import json
 import logging
 import time
-from datetime import date
+from datetime import date, datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from brokers import CapitalBroker, BaseBroker
 from config import (
@@ -35,7 +40,9 @@ from config import (
     RSI_OVERSOLD,
     RSI_WINDOW,
     RISK_PER_TRADE,
+    SLIPPAGE_PCT,
     SLOW_WINDOW,
+    STATE_FILE,
     STOP_LOSS_PCT,
     TAKE_PROFIT_MULT,
     TAKE_PROFIT_PCT,
@@ -48,7 +55,10 @@ from strategy import atr_stop_distance, moving_average_signal
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
+    handlers=[
+        RotatingFileHandler("bot.log", maxBytes=10 * 1024 * 1024, backupCount=5),
+        logging.StreamHandler(),
+    ],
 )
 logger = logging.getLogger(__name__)
 
@@ -85,23 +95,112 @@ class TradingState:
         self.position_high = price
         self.position_low = price
 
+    def save(self, path: str = STATE_FILE) -> None:
+        """Persist state to *path* so the bot can recover after a crash."""
+        data = {
+            "position_high": self.position_high,
+            "position_low": self.position_low if self.position_low != float("inf") else None,
+            "last_snapshot_date": self.last_snapshot_date.isoformat() if self.last_snapshot_date else None,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            Path(path).write_text(json.dumps(data))
+        except OSError as exc:
+            logger.warning("Could not save state: %s", exc)
+
+    @classmethod
+    def load(cls, path: str = STATE_FILE) -> "TradingState":
+        """Load state from *path*, returning a fresh state if the file is missing."""
+        state = cls()
+        try:
+            data = json.loads(Path(path).read_text())
+            state.position_high = float(data.get("position_high") or 0.0)
+            low = data.get("position_low")
+            state.position_low = float(low) if low is not None else float("inf")
+            d = data.get("last_snapshot_date")
+            state.last_snapshot_date = date.fromisoformat(d) if d else None
+            logger.info("Restored trading state from %s.", path)
+        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+            pass
+        return state
+
+
+# ------------------------------------------------------------------
+# Dry-run broker wrapper
+# ------------------------------------------------------------------
+
+
+class DryRunBroker(BaseBroker):
+    """
+    Wraps any live broker and replaces order submission with log-only calls.
+    All read operations (prices, positions, equity) pass through to the
+    underlying broker so the signal logic runs on real data.
+    """
+
+    def __init__(self, inner: BaseBroker) -> None:
+        self._inner = inner
+
+    def get_recent_bars(self, symbol, limit, timeframe="1Min"):
+        return self._inner.get_recent_bars(symbol, limit, timeframe)
+
+    def get_position_qty(self, symbol):
+        return self._inner.get_position_qty(symbol)
+
+    def get_entry_price(self, symbol):
+        return self._inner.get_entry_price(symbol)
+
+    def has_open_order(self, symbol):
+        return self._inner.has_open_order(symbol)
+
+    def submit_buy(self, symbol, qty, sl=None, tp=None):
+        logger.info("[DRY-RUN] Would BUY  %.6f %s (SL=%s, TP=%s)", qty, symbol, sl, tp)
+
+    def submit_sell(self, symbol, qty, sl=None, tp=None):
+        logger.info("[DRY-RUN] Would SELL %.6f %s (SL=%s, TP=%s)", qty, symbol, sl, tp)
+
+    def get_market_status(self):
+        return self._inner.get_market_status()
+
+    def get_buying_power(self):
+        return self._inner.get_buying_power()
+
+    def get_equity(self):
+        return self._inner.get_equity()
+
+    def snapshot_day(self):
+        return self._inner.snapshot_day()
+
+    def flush_position_cache(self):
+        return self._inner.flush_position_cache()
+
+    @property
+    def supports_shorting(self):
+        return self._inner.supports_shorting
+
 
 # ------------------------------------------------------------------
 # Helper functions
 # ------------------------------------------------------------------
 
 
-def position_size(equity: float, price: float) -> float:
+def position_size(equity: float, stop_distance: float, price: float) -> float:
     """
-    Calculate order quantity as ``RISK_PER_TRADE`` fraction of current equity.
+    Calculate order quantity using true risk-based sizing, capped by affordability.
 
-    Using equity (rather than raw buying power) keeps position sizes stable
-    as the account grows or shrinks over time.
+    ``RISK_PER_TRADE`` is the fraction of equity we are willing to *lose* if
+    stopped out, so: qty = (equity × RISK_PER_TRADE) / stop_distance.
+
+    This keeps dollar risk constant regardless of price level or volatility —
+    wider stops produce smaller positions, tighter stops produce larger ones.
+    The result is further capped so the total position cost never exceeds equity.
     """
-    if price <= 0:
+    if stop_distance <= 0 or price <= 0:
         return 0.0
-    qty = (equity * RISK_PER_TRADE) / price
-    return round(max(0.0, qty), 6)  # 6 decimal places — safe for crypto
+    qty_by_risk  = (equity * RISK_PER_TRADE) / stop_distance
+    # Cap at 99.9% of equity divided by worst-case fill price to ensure the
+    # order cost stays within available cash after slippage and float rounding.
+    qty_by_funds = equity * 0.999 / (price * (1 + SLIPPAGE_PCT))
+    return round(max(0.0, min(qty_by_risk, qty_by_funds)), 6)
 
 
 def daily_loss_exceeded(broker: BaseBroker) -> bool:
@@ -180,6 +279,12 @@ def run_once(
     bars = broker.get_recent_bars(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
 
     latest_price = float(bars["c"].iloc[-1])
+
+    # Compute ATR once — used for both the trailing stop check and position sizing.
+    atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
+    stop_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
+    tp_dist   = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
+
     signal = moving_average_signal(
         bars,
         fast_window=FAST_WINDOW,
@@ -221,15 +326,9 @@ def run_once(
     if current_qty != 0:
         entry_price = broker.get_entry_price(SYMBOL)
         if entry_price:
-            atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
-            
-            # 1. Trailing Stop Loss (locks in profits)
-            stop_dist = max(atr * ATR_STOP_MULT, entry_price * STOP_LOSS_PCT)
             long_stopped  = current_qty > 0 and latest_price <= state.position_high - stop_dist
             short_stopped = current_qty < 0 and latest_price >= state.position_low  + stop_dist
 
-            # 2. Fixed Take Profit (optional ceiling)
-            tp_dist = max(atr * TAKE_PROFIT_MULT, entry_price * TAKE_PROFIT_PCT)
             long_tp  = current_qty > 0 and latest_price >= entry_price + tp_dist
             short_tp = current_qty < 0 and latest_price <= entry_price - tp_dist
 
@@ -246,7 +345,7 @@ def run_once(
                 else:
                     broker.submit_buy(SYMBOL, abs(current_qty))
                     ref = state.position_low
-                
+
                 state.reset_watermarks(latest_price)
                 logger.warning(
                     f"{exit_reason}: closed {abs(current_qty):.6f} {SYMBOL} "
@@ -258,8 +357,9 @@ def run_once(
                 return
 
     # --- Signal execution ---
+    # True risk-based sizing: risk exactly RISK_PER_TRADE × equity on this trade.
     equity, _ = broker.get_equity()
-    qty = position_size(equity, latest_price)
+    qty = position_size(equity, stop_dist, latest_price)
 
     if signal == "BUY":
         if current_qty > 0:
@@ -273,14 +373,8 @@ def run_once(
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
             else:
-                # Calculate SL/TP for the new LONG position
-                atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
-                sl_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
-                tp_dist = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
-                
-                sl_price = round(latest_price - sl_dist, 2)
-                tp_price = round(latest_price + tp_dist, 2)
-
+                sl_price = round(latest_price - stop_dist, 8)
+                tp_price = round(latest_price + tp_dist, 8)
                 broker.submit_buy(SYMBOL, qty, sl=sl_price, tp=tp_price)
                 state.position_high = latest_price
                 logger.info(
@@ -302,14 +396,8 @@ def run_once(
             elif qty <= 0:
                 logger.info("Insufficient equity to open short.")
             else:
-                # Calculate SL/TP for the new SHORT position
-                atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
-                sl_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
-                tp_dist = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
-
-                sl_price = round(latest_price + sl_dist, 2)
-                tp_price = round(latest_price - tp_dist, 2)
-
+                sl_price = round(latest_price + stop_dist, 8)
+                tp_price = round(latest_price - tp_dist, 8)
                 broker.submit_sell(SYMBOL, qty, sl=sl_price, tp=tp_price)
                 state.position_low = latest_price
                 logger.info(
@@ -329,25 +417,30 @@ def run_once(
 # ------------------------------------------------------------------
 
 
-def run_bot(broker: BaseBroker | None = None) -> None:
+def run_bot(broker: BaseBroker | None = None, dry_run: bool = False) -> None:
     """
     Start the live trading loop.
 
     Accepts an optional ``broker`` argument to allow dependency injection
-    (useful for testing with a BacktestBroker).
+    (useful for testing with a BacktestBroker).  Pass ``dry_run=True`` to log
+    orders without submitting them.
     """
     if broker is None:
-        from brokers import CapitalBroker
         broker = CapitalBroker()
+
+    if dry_run:
+        broker = DryRunBroker(broker)
+        logger.info("DRY-RUN mode — orders will be logged but not sent.")
 
     logger.info(f"Crypto bot started using {broker.__class__.__name__}.")
 
-    state = TradingState()
+    state = TradingState.load()
     error_backoff = CHECK_INTERVAL_SECONDS
 
     while True:
         try:
             run_once(broker, state, sleep_enabled=True)
+            state.save()
         except Exception as exc:
             logger.exception(f"Bot error: {exc}")
             time.sleep(error_backoff)
@@ -358,4 +451,11 @@ def run_bot(broker: BaseBroker | None = None) -> None:
 
 
 if __name__ == "__main__":
-    run_bot()
+    parser = argparse.ArgumentParser(description="Capital.com trading bot")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Log orders without submitting them (safe for testing against live data)",
+    )
+    args = parser.parse_args()
+    run_bot(dry_run=args.dry_run)

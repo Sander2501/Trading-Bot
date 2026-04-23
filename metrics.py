@@ -21,7 +21,7 @@ Example usage with BacktestBroker::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -87,7 +87,7 @@ class TradeMetrics:
             ``max_drawdown``.
         """
         if not trades:
-            self.last_updated = datetime.utcnow()
+            self.last_updated = datetime.now(timezone.utc)
             return
 
         self.total_trades = len(trades)
@@ -111,7 +111,7 @@ class TradeMetrics:
         self.avg_win = sum(wins) / len(wins) if wins else 0.0
         self.avg_loss = sum(losses) / len(losses) if losses else 0.0
         self.max_drawdown = _max_drawdown(equity_curve)
-        self.last_updated = datetime.utcnow()
+        self.last_updated = datetime.now(timezone.utc)
 
     @classmethod
     def from_trades(
