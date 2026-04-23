@@ -120,9 +120,8 @@ class CapitalBroker(BaseBroker):
         response.raise_for_status()
         self._cst            = response.headers["CST"]
         self._security_token = response.headers["X-SECURITY-TOKEN"]
-        use_demo_env = _DEMO_BASE_URL in self._base_url
-        env_label = "demo" if use_demo_env else "live"
-        logger.info("Capital.com session established (%s).", "demo" if _DEMO_BASE_URL in self._base_url else "live")
+        use_demo = _DEMO_BASE_URL in self._base_url
+        logger.info("Capital.com session established (%s).", "demo" if use_demo else "live")
 
     @property
     def _auth_headers(self) -> dict[str, str]:
