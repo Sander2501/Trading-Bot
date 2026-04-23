@@ -5,37 +5,51 @@ import pandas as pd
 
 class BaseBroker(ABC):
     """
-    Minimal broker interface the bot depends on. Implementations may be live
-    (AlpacaBroker) or simulated (BacktestBroker).
+    Minimal broker interface the bot depends on.
+    Implementations may be live (AlpacaBroker) or simulated (BacktestBroker).
     """
 
     @abstractmethod
     def get_recent_closes(
         self, symbol: str, limit: int, timeframe: str = "1Min"
-    ) -> pd.Series: ...
+    ) -> pd.Series:
+        pass
 
     @abstractmethod
-    def get_position_qty(self, symbol: str) -> int: ...
+    def get_position_qty(self, symbol: str) -> int:
+        pass
 
     @abstractmethod
-    def get_entry_price(self, symbol: str) -> float | None: ...
+    def get_entry_price(self, symbol: str) -> float | None:
+        pass
 
     @abstractmethod
-    def has_open_order(self, symbol: str) -> bool: ...
+    def has_open_order(self, symbol: str) -> bool:
+        pass
 
     @abstractmethod
-    def submit_buy(self, symbol: str, qty: int) -> None: ...
+    def submit_buy(self, symbol: str, qty: int) -> None:
+        pass
 
     @abstractmethod
-    def submit_sell(self, symbol: str, qty: int) -> None: ...
+    def submit_sell(self, symbol: str, qty: int) -> None:
+        pass
 
     @abstractmethod
-    def get_market_status(self) -> tuple[bool, float]: ...
+    def get_market_status(self) -> tuple[bool, float]:
+        """
+        Returns (is_open, seconds_until_open).
+        """
+        pass
 
     @abstractmethod
-    def get_buying_power(self) -> float: ...
+    def get_buying_power(self) -> float:
+        pass
 
     @abstractmethod
     def get_equity(self) -> tuple[float, float]:
-        """Returns (current_equity, last_equity). Used for daily-loss checks."""
-        ...
+        """
+        Returns (current_equity, last_equity).
+        Used for daily-loss checks.
+        """
+        pass

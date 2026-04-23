@@ -6,10 +6,14 @@ from base_broker import BaseBroker
 class BacktestBroker(BaseBroker):
     """
     Replays a CSV of historical bars so the bot's signal logic can be tested
-    offline. Expected CSV columns: `t` (timestamp) and `c` (close price).
+    offline.
 
-    `advance()` moves the simulated clock forward one bar. All read methods
-    return state as of the current cursor.
+    Expected CSV columns:
+    - `t` : timestamp
+    - `c` : close price
+
+    `advance()` moves the simulated clock forward one bar.
+    All read methods return state as of the current cursor.
     """
 
     def __init__(
@@ -19,21 +23,32 @@ class BacktestBroker(BaseBroker):
         starting_cash: float = 100_000.0,
     ):
         df = pd.read_csv(csv_path)
+
+        if "c" not in df.columns:
+            raise ValueError("CSV must contain a 'c' column for close prices.")
+
         if "t" in df.columns:
             df = df.sort_values("t").reset_index(drop=True)
+
         self._closes: pd.Series = df["c"].astype(float)
         self._symbol = symbol
         self._cursor = 0
+
         self._qty = 0
         self._entry_price: float | None = None
         self._cash = starting_cash
         self._starting_equity = starting_cash
         self._last_equity = starting_cash
+
         self.trades: list[dict] = []
 
     # -------- simulation controls --------
 
     def advance(self) -> bool:
+        """
+        Move forward one bar.
+        Returns True if there is still data left after advancing.
+        """
         self._cursor += 1
         return self._cursor < len(self._closes)
 
@@ -41,7 +56,10 @@ class BacktestBroker(BaseBroker):
         return self._cursor >= len(self._closes)
 
     def snapshot_day(self) -> None:
-        """Call at session boundaries to freeze last_equity."""
+        """
+        Freeze current equity into last_equity.
+        Can be called manually at session/day boundaries if desired.
+        """
         self._last_equity = self._equity()
 
     # -------- BaseBroker implementation --------
@@ -50,8 +68,10 @@ class BacktestBroker(BaseBroker):
         self, symbol: str, limit: int = 30, timeframe: str = "1Min"
     ) -> pd.Series:
         self._check_symbol(symbol)
+
         end = self._cursor + 1
         start = max(0, end - limit)
+
         return self._closes.iloc[start:end].reset_index(drop=True)
 
     def get_position_qty(self, symbol: str) -> int:
@@ -63,28 +83,73 @@ class BacktestBroker(BaseBroker):
         return self._entry_price
 
     def has_open_order(self, symbol: str) -> bool:
+        self._check_symbol(symbol)
         return False
 
     def submit_buy(self, symbol: str, qty: int) -> None:
         self._check_symbol(symbol)
+
+        if qty <= 0:
+            raise ValueError("Buy quantity must be > 0")
+
         price = self._current_price()
-        self._cash -= price * qty
+        cost = price * qty
+
+        if cost > self._cash:
+            raise ValueError(
+                f"Not enough cash to buy {qty} shares at {price:.2f}. "
+                f"Cash available: {self._cash:.2f}"
+            )
+
+        self._cash -= cost
+
         if self._qty == 0:
             self._entry_price = price
         else:
-            total_cost = (self._entry_price or 0) * self._qty + price * qty
+            total_cost = (self._entry_price or 0.0) * self._qty + cost
             self._entry_price = total_cost / (self._qty + qty)
+
         self._qty += qty
-        self.trades.append({"side": "BUY", "qty": qty, "price": price, "t": self._cursor})
+
+        self.trades.append(
+            {
+                "side": "BUY",
+                "qty": qty,
+                "price": price,
+                "t": self._cursor,
+                "equity": self._equity(),
+            }
+        )
 
     def submit_sell(self, symbol: str, qty: int) -> None:
         self._check_symbol(symbol)
+
+        if qty <= 0:
+            raise ValueError("Sell quantity must be > 0")
+
+        if qty > self._qty:
+            raise ValueError(
+                f"Cannot sell {qty} shares; only {self._qty} currently held."
+            )
+
         price = self._current_price()
-        self._cash += price * qty
+        proceeds = price * qty
+
+        self._cash += proceeds
         self._qty -= qty
+
         if self._qty == 0:
             self._entry_price = None
-        self.trades.append({"side": "SELL", "qty": qty, "price": price, "t": self._cursor})
+
+        self.trades.append(
+            {
+                "side": "SELL",
+                "qty": qty,
+                "price": price,
+                "t": self._cursor,
+                "equity": self._equity(),
+            }
+        )
 
     def get_market_status(self) -> tuple[bool, float]:
         return True, 0.0
