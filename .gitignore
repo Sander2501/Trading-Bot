@@ -20,5 +20,8 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Generated backtest artifacts
+# Generated runtime artifacts
 backtest_report.json
+bot_metrics.jsonl
+bot_state.json
+bot.log*

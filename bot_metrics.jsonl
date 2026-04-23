@@ -16,3 +16,4 @@
 {"ts":"2026-04-23T15:44:42.540293+00:00","cycle":16,"symbol":"BTC/USD","timeframe":"5Min","price":78557.075,"signal":"HOLD","action":"NO_ACTION","position_qty":0.0,"equity":1000.16,"open_order":false,"open_order_streak":0}
 {"ts":"2026-04-23T15:45:49.167832+00:00","cycle":17,"symbol":"BTC/USD","timeframe":"5Min","price":78451.85,"signal":"HOLD","action":"NO_ACTION","position_qty":0.0,"equity":1000.16,"open_order":false,"open_order_streak":0}
 {"ts":"2026-04-23T15:46:54.968161+00:00","cycle":18,"symbol":"BTC/USD","timeframe":"5Min","price":78307.5,"signal":"HOLD","action":"NO_ACTION","position_qty":0.0,"equity":1000.16,"open_order":false,"open_order_streak":0}
+{"ts":"2026-04-23T15:47:59.868163+00:00","cycle":19,"symbol":"BTC/USD","timeframe":"5Min","price":78369.25,"signal":"HOLD","action":"NO_ACTION","position_qty":0.0,"equity":1000.16,"open_order":false,"open_order_streak":0}
