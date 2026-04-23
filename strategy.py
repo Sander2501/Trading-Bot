@@ -88,6 +88,11 @@ def moving_average_signal(
     1. TRENDING (ADX > 25): Follow EMA crossovers with MACD confirmation + RSI timing.
     2. RANGING (ADX between 20-25): Use RSI pullbacks within the major trend.
     3. SIDEWAYS (ADX < 20): Stay flat to avoid chop (User requested filter).
+
+    Note on ``confirm_bars``:
+    ``confirm_bars`` still affects warm-up requirements and can reduce noisy entries,
+    but the "early crossover" branch is intentionally allowed to trigger before
+    full confirmation in strong reversal conditions.
     """
     closes = bars["c"]
     highs  = bars["h"]

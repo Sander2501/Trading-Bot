@@ -1,5 +1,7 @@
 # Trading Bot
 
+[![Tests](https://github.com/Sander2501/Trading-Bot/actions/workflows/tests.yml/badge.svg)](https://github.com/Sander2501/Trading-Bot/actions/workflows/tests.yml)
+
 A modular Python trading bot for **paper trading** with Capital.com.  
 It implements a triple-EMA trend-following strategy with MACD, ADX, and RSI confirmation.
 
@@ -52,8 +54,9 @@ python -m venv .venv
 source .venv/bin/activate          # macOS / Linux
 # .venv\Scripts\activate           # Windows
 
-# 3. Install dependencies (includes pytest)
-pip install -r requirements.txt
+# 3. One-command project setup (installs all dependencies, including pytest)
+make setup
+# (Alternative without make: pip install -r requirements.txt)
 
 # 4. Copy the example environment file and add your credentials
 cp .env.example .env
@@ -148,7 +151,7 @@ The strategy uses a **triple-EMA trend filter** with **MACD**, **ADX**, and **RS
 1. **ADX < threshold** → `HOLD` (sideways/choppy market, all signals suppressed)
 2. **TRENDING + BULL** (price > Trend EMA, ADX > 25):  
    - Fast > Slow + MACD positive + RSI < 45 → `BUY`  
-   - Fresh EMA crossover → `BUY` (early entry)
+   - Fresh EMA crossover → `BUY` (early entry, can trigger before `CONFIRM_BARS`)
 3. **TRENDING + BEAR**:  
    - Fast < Slow + MACD negative + RSI > 55 → `SELL`
 4. **RANGING** (ADX 20–25):  
@@ -201,6 +204,9 @@ python run_backtest.py
 | `CONFIRM_BARS` | 3 | 2 | 1 |
 | `ATR_STOP_MULT` | 3.0 | 2.0 | 1.5 |
 | `RISK_PER_TRADE` | 0.01 | 0.02 | 0.05 |
+
+> **Note on `CONFIRM_BARS`:** the strategy also has an "early crossover" path for strong trend reversals.  
+> In practice, this means `CONFIRM_BARS` still reduces noise, but some fresh crossovers can enter earlier by design.
 
 **Key metrics to watch:**
 
