@@ -50,14 +50,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Track the last calendar day on which snapshot_day() was called so the
-# daily-loss baseline is refreshed exactly once per day.
-_last_snapshot_date: date | None = None
 
-# Trailing-stop watermarks, reset each time a new position is opened.
-# Long trades trail the highest price seen; short trades trail the lowest.
-_position_high: float = 0.0
-_position_low: float = float("inf")
+# ------------------------------------------------------------------
+# State container
+# ------------------------------------------------------------------
+
+
+class TradingState:
+    """
+    Encapsulates mutable bot state that must persist across ``run_once`` cycles.
+
+    Attributes
+    ----------
+    position_high:
+        Highest price seen since the current long position was opened.
+        Used to trail the ATR stop upward as the trade moves in our favour.
+    position_low:
+        Lowest price seen since the current short position was opened.
+        Used to trail the ATR stop downward for short trades.
+    last_snapshot_date:
+        Calendar date on which ``snapshot_day()`` was last called so the
+        daily-loss baseline is refreshed exactly once per day.
+    """
+
+    def __init__(self) -> None:
+        self.position_high: float = 0.0
+        self.position_low: float = float("inf")
+        self.last_snapshot_date: date | None = None
+
+    def reset_watermarks(self, price: float) -> None:
+        """Seed both watermarks to *price* when a new position is opened."""
+        self.position_high = price
+        self.position_low = price
 
 
 # ------------------------------------------------------------------
@@ -86,13 +110,12 @@ def daily_loss_exceeded(broker: BaseBroker) -> bool:
     return (last_equity - equity) / last_equity >= MAX_DAILY_LOSS_PCT
 
 
-def _maybe_snapshot_day(broker: BaseBroker) -> None:
+def _maybe_snapshot_day(broker: BaseBroker, state: TradingState) -> None:
     """Refresh the daily-loss baseline once per calendar day."""
-    global _last_snapshot_date
     today = date.today()
-    if _last_snapshot_date != today:
+    if state.last_snapshot_date != today:
         broker.snapshot_day()
-        _last_snapshot_date = today
+        state.last_snapshot_date = today
         logger.info("Daily equity snapshot taken.")
 
 
@@ -101,7 +124,11 @@ def _maybe_snapshot_day(broker: BaseBroker) -> None:
 # ------------------------------------------------------------------
 
 
-def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
+def run_once(
+    broker: BaseBroker,
+    state: TradingState | None = None,
+    sleep_enabled: bool = True,
+) -> None:
     """
     Execute a single trading cycle:
 
@@ -111,8 +138,23 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
     4. Halt for the day if the daily-loss limit has been reached.
     5. Generate an EMA-crossover + RSI signal.
     6. Apply stop-loss, then act on BUY / SELL signals.
+
+    Parameters
+    ----------
+    broker:
+        Broker instance (live or backtest).
+    state:
+        Mutable trading state for watermarks and daily snapshot tracking.
+        A fresh ``TradingState`` is created automatically if *None* is passed,
+        which preserves backward compatibility with callers that omit the argument.
+    sleep_enabled:
+        When ``False`` the function returns immediately instead of sleeping
+        (useful for backtests and unit tests).
     """
-    _maybe_snapshot_day(broker)
+    if state is None:
+        state = TradingState()
+
+    _maybe_snapshot_day(broker, state)
     broker.flush_position_cache()
 
     is_open, wait = broker.get_market_status()
@@ -168,14 +210,12 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
     # --- Trailing ATR stop-loss ---
     # Watermarks follow price in the profitable direction so the stop moves
     # with the trade instead of staying pinned to the entry price.
-    global _position_high, _position_low
     if current_qty > 0:
-        _position_high = max(_position_high, latest_price)
+        state.position_high = max(state.position_high, latest_price)
     elif current_qty < 0:
-        _position_low = min(_position_low, latest_price)
+        state.position_low = min(state.position_low, latest_price)
     else:
-        _position_high = latest_price      # pre-seed for the position about to open
-        _position_low  = latest_price
+        state.reset_watermarks(latest_price)  # pre-seed for the position about to open
 
     if current_qty != 0:
         entry_price = broker.get_entry_price(SYMBOL)
@@ -185,18 +225,17 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
             stop_distance = max(atr_stop, stop_floor)
 
             # Trail from the watermark, not from entry — locks in profits on big moves
-            long_stopped  = current_qty > 0 and latest_price <= _position_high - stop_distance
-            short_stopped = current_qty < 0 and latest_price >= _position_low  + stop_distance
+            long_stopped  = current_qty > 0 and latest_price <= state.position_high - stop_distance
+            short_stopped = current_qty < 0 and latest_price >= state.position_low  + stop_distance
 
             if long_stopped or short_stopped:
                 if current_qty > 0:
                     broker.submit_sell(SYMBOL, current_qty)
-                    direction, ref = "long", _position_high
+                    direction, ref = "long", state.position_high
                 else:
                     broker.submit_buy(SYMBOL, abs(current_qty))
-                    direction, ref = "short", _position_low
-                _position_high = latest_price
-                _position_low  = latest_price
+                    direction, ref = "short", state.position_low
+                state.reset_watermarks(latest_price)
                 logger.warning(
                     f"TRAILING STOP ({direction}): closed {abs(current_qty):.6f} {SYMBOL} "
                     f"at {latest_price:.2f} (peak/trough {ref:.2f}, "
@@ -216,15 +255,14 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
         elif current_qty < 0:
             # Cover short first; next cycle opens the long if signal persists
             broker.submit_buy(SYMBOL, abs(current_qty))
-            _position_high = latest_price
-            _position_low  = latest_price
+            state.reset_watermarks(latest_price)
             logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
             else:
                 broker.submit_buy(SYMBOL, qty)
-                _position_high = latest_price
+                state.position_high = latest_price
                 logger.info(f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
 
     elif signal == "SELL":
@@ -233,8 +271,7 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
         elif current_qty > 0:
             # Close long first; next cycle opens the short if signal persists
             broker.submit_sell(SYMBOL, current_qty)
-            _position_high = latest_price
-            _position_low  = latest_price
+            state.reset_watermarks(latest_price)
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
             if not broker.supports_shorting:
@@ -243,7 +280,7 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
                 logger.info("Insufficient equity to open short.")
             else:
                 broker.submit_sell(SYMBOL, qty)
-                _position_low = latest_price
+                state.position_low = latest_price
                 logger.info(f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
 
     else:
@@ -271,11 +308,12 @@ def run_bot(broker: BaseBroker | None = None) -> None:
 
     logger.info(f"Crypto bot started using {broker.__class__.__name__}.")
 
+    state = TradingState()
     error_backoff = CHECK_INTERVAL_SECONDS
 
     while True:
         try:
-            run_once(broker, sleep_enabled=True)
+            run_once(broker, state, sleep_enabled=True)
         except Exception as exc:
             logger.exception(f"Bot error: {exc}")
             time.sleep(error_backoff)

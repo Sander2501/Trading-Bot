@@ -2,7 +2,7 @@ import os
 
 from brokers import BacktestBroker
 from config import CSV_PATH, STARTING_CASH, SYMBOL
-from main import run_once
+from main import TradingState, run_once
 
 
 def main() -> None:
@@ -13,10 +13,12 @@ def main() -> None:
         starting_cash=STARTING_CASH,
     )
 
+    state = TradingState()
+
     # Replay every bar through the same run_once logic used in live trading.
     # broker.done() becomes True once the cursor has passed the last bar.
     while not broker.done():
-        run_once(broker, sleep_enabled=False)
+        run_once(broker, state, sleep_enabled=False)
         broker.advance()
 
     # Force-close any open position at the end of the simulation

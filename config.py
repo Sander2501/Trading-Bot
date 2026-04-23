@@ -9,6 +9,7 @@ which keeps configuration in one place and avoids scattered ``load_dotenv``
 calls throughout the codebase.
 """
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -80,3 +81,49 @@ CSV_PATH: str = os.getenv("BACKTEST_CSV", "historical_data.csv")
 
 #: Starting cash for the simulated backtest account.
 STARTING_CASH: float = float(os.getenv("BACKTEST_STARTING_CASH", "100000"))
+
+
+# ── Validation ────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger(__name__)
+
+
+def validate_config() -> None:
+    """
+    Validate configuration parameter constraints.
+
+    Raises ``ValueError`` if any parameter violates its expected constraint.
+    Called automatically on module load so misconfiguration is caught early.
+    """
+    if FAST_WINDOW >= SLOW_WINDOW:
+        raise ValueError(
+            f"FAST_WINDOW ({FAST_WINDOW}) must be < SLOW_WINDOW ({SLOW_WINDOW})"
+        )
+    if SLOW_WINDOW >= TREND_WINDOW:
+        raise ValueError(
+            f"SLOW_WINDOW ({SLOW_WINDOW}) must be < TREND_WINDOW ({TREND_WINDOW})"
+        )
+    if not (0 < RSI_OVERSOLD < RSI_OVERBOUGHT < 100):
+        raise ValueError(
+            f"RSI thresholds must satisfy 0 < RSI_OVERSOLD ({RSI_OVERSOLD}) "
+            f"< RSI_OVERBOUGHT ({RSI_OVERBOUGHT}) < 100"
+        )
+    if not (0 < RISK_PER_TRADE <= 0.5):
+        raise ValueError(
+            f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 0.5]; "
+            f"got {RISK_PER_TRADE * 100:.1f}%"
+        )
+    if MAX_DAILY_LOSS_PCT <= 0 or MAX_DAILY_LOSS_PCT > 1:
+        raise ValueError(
+            f"MAX_DAILY_LOSS_PCT ({MAX_DAILY_LOSS_PCT}) must be in (0, 1]"
+        )
+    if STOP_LOSS_PCT < 0:
+        raise ValueError(f"STOP_LOSS_PCT ({STOP_LOSS_PCT}) must be >= 0")
+    if ATR_STOP_MULT <= 0:
+        raise ValueError(f"ATR_STOP_MULT ({ATR_STOP_MULT}) must be > 0")
+    if STARTING_CASH <= 0:
+        raise ValueError(f"BACKTEST_STARTING_CASH ({STARTING_CASH}) must be > 0")
+    logger.debug("Configuration validated successfully.")
+
+
+validate_config()
