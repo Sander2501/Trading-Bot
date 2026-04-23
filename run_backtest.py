@@ -14,6 +14,7 @@ performance report and saves ``backtest_report.json``.
 
 import json
 import statistics
+from collections import deque
 from datetime import datetime
 
 from brokers import BacktestBroker
@@ -46,31 +47,57 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
             if dd > max_dd:
                 max_dd = dd
 
-    # Win rate & Avg Win/Loss
-    long_entry: float | None = None
-    short_entry: float | None = None
+    # Win rate & Avg Win/Loss using FIFO lot matching.
+    # This handles scale-ins/scale-outs better than single-entry/single-exit pairing.
+    long_lots: deque[tuple[float, float]] = deque()   # (qty, entry_price)
+    short_lots: deque[tuple[float, float]] = deque()  # (qty, entry_price)
     wins: list[float] = []
     losses: list[float] = []
-    
+
     for t in trades:
-        if t["side"] == "BUY":
-            long_entry = t["price"]
-        elif t["side"] == "SELL" and long_entry is not None:
-            pnl = t["price"] - long_entry
-            if pnl > 0:
-                wins.append(pnl)
-            else:
-                losses.append(pnl)
-            long_entry = None
-        elif t["side"] == "SHORT":
-            short_entry = t["price"]
-        elif t["side"] == "COVER" and short_entry is not None:
-            pnl = short_entry - t["price"]  # profit on short = entry > cover
-            if pnl > 0:
-                wins.append(pnl)
-            else:
-                losses.append(pnl)
-            short_entry = None
+        qty = float(t["qty"])
+        price = float(t["price"])
+        side = t["side"]
+
+        # BUY/COVER: close existing short lots first, then open long lots.
+        if side in {"BUY", "COVER"}:
+            qty_left = qty
+            while qty_left > 0 and short_lots:
+                lot_qty, lot_price = short_lots[0]
+                matched = min(qty_left, lot_qty)
+                pnl = (lot_price - price) * matched
+                if pnl > 0:
+                    wins.append(pnl)
+                else:
+                    losses.append(pnl)
+                qty_left -= matched
+                lot_qty -= matched
+                if lot_qty == 0:
+                    short_lots.popleft()
+                else:
+                    short_lots[0] = (lot_qty, lot_price)
+            if qty_left > 0:
+                long_lots.append((qty_left, price))
+
+        # SELL/SHORT: close existing long lots first, then open short lots.
+        elif side in {"SELL", "SHORT"}:
+            qty_left = qty
+            while qty_left > 0 and long_lots:
+                lot_qty, lot_price = long_lots[0]
+                matched = min(qty_left, lot_qty)
+                pnl = (price - lot_price) * matched
+                if pnl > 0:
+                    wins.append(pnl)
+                else:
+                    losses.append(pnl)
+                qty_left -= matched
+                lot_qty -= matched
+                if lot_qty == 0:
+                    long_lots.popleft()
+                else:
+                    long_lots[0] = (lot_qty, lot_price)
+            if qty_left > 0:
+                short_lots.append((qty_left, price))
 
     total_trips = len(wins) + len(losses)
     win_rate = len(wins) / total_trips * 100 if total_trips > 0 else 0.0
