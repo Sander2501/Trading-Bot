@@ -17,10 +17,9 @@ to the configured risk parameters.  It runs in an infinite loop, sleeping
 import argparse
 import json
 import logging
+import json
 import time
 from datetime import date, datetime, timezone
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
 from brokers import CapitalBroker, BaseBroker
 from config import (
@@ -30,12 +29,15 @@ from config import (
     ATR_STOP_WINDOW,
     CHECK_INTERVAL_SECONDS,
     CONFIRM_BARS,
+    ERROR_COOLDOWN_SECONDS,
     FAST_WINDOW,
     MACD_FAST,
     MACD_SIGNAL_WINDOW,
     MACD_SLOW,
     MAX_BACKOFF_SECONDS,
+    MAX_CONSECUTIVE_ERRORS,
     MAX_DAILY_LOSS_PCT,
+    OPEN_ORDER_STALE_CYCLES,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
     RSI_WINDOW,
@@ -61,6 +63,13 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+# ── Metrics logging ──────────────────────────────────────────────────────────
+#: File path where JSON-line metrics records are appended.
+METRICS_LOG_PATH: str = "bot_metrics.jsonl"
+
+#: Print a heartbeat summary to the console every N cycles.
+METRICS_HEARTBEAT_CYCLES: int = 10
 
 
 # ------------------------------------------------------------------
@@ -89,6 +98,8 @@ class TradingState:
         self.position_high: float = 0.0
         self.position_low: float = float("inf")
         self.last_snapshot_date: date | None = None
+        self.open_order_streak: int = 0
+        self.cycles: int = 0
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
@@ -220,6 +231,47 @@ def _maybe_snapshot_day(broker: BaseBroker, state: TradingState) -> None:
         logger.info("Daily equity snapshot taken.")
 
 
+def _emit_cycle_metrics(
+    state: TradingState,
+    latest_price: float,
+    signal: str,
+    current_qty: float,
+    action: str,
+    open_order_exists: bool,
+    equity: float,
+) -> None:
+    """Append a structured per-cycle JSONL record for observability."""
+    payload = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "cycle": state.cycles,
+        "symbol": SYMBOL,
+        "timeframe": TIMEFRAME,
+        "price": round(latest_price, 8),
+        "signal": signal,
+        "action": action,
+        "position_qty": round(current_qty, 8),
+        "equity": round(equity, 8),
+        "open_order": bool(open_order_exists),
+        "open_order_streak": state.open_order_streak,
+    }
+    try:
+        with open(METRICS_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to write metrics record to %s: %s", METRICS_LOG_PATH, exc)
+
+    if state.cycles % METRICS_HEARTBEAT_CYCLES == 0:
+        logger.info(
+            "HEARTBEAT cycle=%d signal=%s action=%s qty=%.6f equity=%.2f open_order=%s",
+            state.cycles,
+            signal,
+            action,
+            current_qty,
+            equity,
+            open_order_exists,
+        )
+
+
 # ------------------------------------------------------------------
 # Core trading cycle
 # ------------------------------------------------------------------
@@ -256,6 +308,7 @@ def run_once(
         state = TradingState()
 
     _maybe_snapshot_day(broker, state)
+    state.cycles += 1
     broker.flush_position_cache()
 
     is_open, wait = broker.get_market_status()
@@ -302,6 +355,7 @@ def run_once(
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
+    equity, _ = broker.get_equity()
 
     logger.info(
         f"{SYMBOL} | price={latest_price:.2f} | signal={signal} "
@@ -309,10 +363,21 @@ def run_once(
     )
 
     if open_order_exists:
+        state.open_order_streak += 1
+        if state.open_order_streak >= OPEN_ORDER_STALE_CYCLES:
+            logger.warning(
+                "Open order has persisted for %d consecutive cycles; "
+                "verify broker order state / cancel stale order if needed.",
+                state.open_order_streak,
+            )
         logger.info("Open order already exists. Skipping cycle.")
+        _emit_cycle_metrics(
+            state, latest_price, signal, current_qty, "SKIP_OPEN_ORDER", open_order_exists, equity
+        )
         if sleep_enabled:
             time.sleep(CHECK_INTERVAL_SECONDS)
         return
+    state.open_order_streak = 0
 
     # --- Watermark Tracking ---
     if current_qty > 0:
@@ -352,14 +417,17 @@ def run_once(
                     f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
                     f"stop_dist={stop_dist:.2f}, tp_dist={tp_dist:.2f})"
                 )
+                _emit_cycle_metrics(
+                    state, latest_price, signal, current_qty, f"EXIT_{exit_reason.replace(' ', '_')}",
+                    open_order_exists, equity
+                )
                 if sleep_enabled:
                     time.sleep(CHECK_INTERVAL_SECONDS)
                 return
 
     # --- Signal execution ---
-    # True risk-based sizing: risk exactly RISK_PER_TRADE × equity on this trade.
-    equity, _ = broker.get_equity()
-    qty = position_size(equity, stop_dist, latest_price)
+    qty = position_size(equity, latest_price)
+    action = "HOLD"
 
     if signal == "BUY":
         if current_qty > 0:
@@ -369,9 +437,11 @@ def run_once(
             broker.submit_buy(SYMBOL, abs(current_qty))
             state.reset_watermarks(latest_price)
             logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            action = "COVER_SHORT"
         else:
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
+                action = "SKIP_NO_BUYING_POWER"
             else:
                 sl_price = round(latest_price - stop_dist, 8)
                 tp_price = round(latest_price + tp_dist, 8)
@@ -381,6 +451,7 @@ def run_once(
                     f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
                 )
+                action = "OPEN_LONG"
 
     elif signal == "SELL":
         if current_qty < 0:
@@ -390,11 +461,14 @@ def run_once(
             broker.submit_sell(SYMBOL, current_qty)
             state.reset_watermarks(latest_price)
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            action = "CLOSE_LONG"
         else:
             if not broker.supports_shorting:
                 logger.info("SELL signal — broker does not support shorting, staying flat.")
+                action = "SKIP_NO_SHORTING"
             elif qty <= 0:
                 logger.info("Insufficient equity to open short.")
+                action = "SKIP_NO_EQUITY"
             else:
                 sl_price = round(latest_price + stop_dist, 8)
                 tp_price = round(latest_price - tp_dist, 8)
@@ -404,12 +478,31 @@ def run_once(
                     f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
                 )
+                action = "OPEN_SHORT"
 
     else:
         logger.info("No action.")
+        action = "NO_ACTION"
+
+    _emit_cycle_metrics(
+        state, latest_price, signal, current_qty, action, open_order_exists, equity
+    )
 
     if sleep_enabled:
         time.sleep(CHECK_INTERVAL_SECONDS)
+
+
+def _update_error_state(
+    consecutive_errors: int,
+    error_backoff: int,
+) -> tuple[int, int, bool]:
+    """
+    Update error counters/backoff and report whether the circuit breaker tripped.
+    """
+    next_errors = consecutive_errors + 1
+    tripped = next_errors >= MAX_CONSECUTIVE_ERRORS
+    next_backoff = min(error_backoff * 2, MAX_BACKOFF_SECONDS)
+    return next_errors, next_backoff, tripped
 
 
 # ------------------------------------------------------------------
@@ -436,6 +529,7 @@ def run_bot(broker: BaseBroker | None = None, dry_run: bool = False) -> None:
 
     state = TradingState.load()
     error_backoff = CHECK_INTERVAL_SECONDS
+    consecutive_errors = 0
 
     while True:
         try:
@@ -443,10 +537,23 @@ def run_bot(broker: BaseBroker | None = None, dry_run: bool = False) -> None:
             state.save()
         except Exception as exc:
             logger.exception(f"Bot error: {exc}")
+            consecutive_errors, error_backoff, tripped = _update_error_state(
+                consecutive_errors, error_backoff
+            )
             time.sleep(error_backoff)
-            error_backoff = min(error_backoff * 2, MAX_BACKOFF_SECONDS)
+            if tripped:
+                logger.critical(
+                    "Circuit breaker tripped after %d consecutive errors; "
+                    "cooling down for %ds before resuming.",
+                    consecutive_errors,
+                    ERROR_COOLDOWN_SECONDS,
+                )
+                time.sleep(ERROR_COOLDOWN_SECONDS)
+                consecutive_errors = 0
+                error_backoff = CHECK_INTERVAL_SECONDS
             continue
 
+        consecutive_errors = 0
         error_backoff = CHECK_INTERVAL_SECONDS  # reset on successful cycle
 
 

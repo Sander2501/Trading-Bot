@@ -105,6 +105,15 @@ CHECK_INTERVAL_SECONDS: int = int(os.getenv("CHECK_INTERVAL_SECONDS", "60"))
 #: Hard cap on exponential-backoff sleep after repeated errors.
 MAX_BACKOFF_SECONDS: int = 600
 
+#: Number of consecutive cycle errors allowed before cooling down.
+MAX_CONSECUTIVE_ERRORS: int = int(os.getenv("MAX_CONSECUTIVE_ERRORS", "5"))
+
+#: Cooldown applied after the consecutive-error circuit breaker trips.
+ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
+
+#: Warn when open working orders persist for this many consecutive cycles.
+OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
+
 # ── Backtest ──────────────────────────────────────────────────────────────────
 #: Path to the CSV file used by BacktestBroker.
 CSV_PATH: str = os.getenv("BACKTEST_CSV", "historical_data.csv")
@@ -162,6 +171,18 @@ def validate_config() -> None:
         raise ValueError(f"ATR_STOP_MULT ({ATR_STOP_MULT}) must be > 0")
     if STARTING_CASH <= 0:
         raise ValueError(f"BACKTEST_STARTING_CASH ({STARTING_CASH}) must be > 0")
+    if MAX_CONSECUTIVE_ERRORS <= 0:
+        raise ValueError(
+            f"MAX_CONSECUTIVE_ERRORS ({MAX_CONSECUTIVE_ERRORS}) must be > 0"
+        )
+    if ERROR_COOLDOWN_SECONDS <= 0:
+        raise ValueError(
+            f"ERROR_COOLDOWN_SECONDS ({ERROR_COOLDOWN_SECONDS}) must be > 0"
+        )
+    if OPEN_ORDER_STALE_CYCLES <= 0:
+        raise ValueError(
+            f"OPEN_ORDER_STALE_CYCLES ({OPEN_ORDER_STALE_CYCLES}) must be > 0"
+        )
     logger.debug("Configuration validated successfully.")
 
 
