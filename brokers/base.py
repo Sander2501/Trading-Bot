@@ -8,6 +8,7 @@ All concrete broker implementations (live or simulated) must subclass
 """
 
 from abc import ABC, abstractmethod
+from datetime import date
 
 import pandas as pd
 
@@ -107,6 +108,17 @@ class BaseBroker(ABC):
         ``last_equity`` value.
         """
         pass
+
+    def current_date(self) -> date:
+        """
+        Return the calendar date the bot should treat as "today" for the
+        daily-loss baseline.
+
+        Live brokers use the wall-clock date (default).  Simulated brokers
+        override this to return the timestamp of the current bar so the
+        daily-loss halt rolls over correctly during backtests.
+        """
+        return date.today()
 
     def flush_position_cache(self) -> None:
         """

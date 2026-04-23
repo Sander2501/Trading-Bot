@@ -26,6 +26,7 @@ from brokers import CapitalBroker, BaseBroker
 from config import (
     ADX_THRESHOLD,
     ADX_WINDOW,
+    ALLOW_SHORTS,
     ATR_STOP_MULT,
     ATR_STOP_WINDOW,
     CHECK_INTERVAL_SECONDS,
@@ -224,12 +225,16 @@ def daily_loss_exceeded(broker: BaseBroker) -> bool:
 
 
 def _maybe_snapshot_day(broker: BaseBroker, state: TradingState) -> None:
-    """Refresh the daily-loss baseline once per calendar day."""
-    today = date.today()
+    """Refresh the daily-loss baseline once per calendar day.
+
+    Uses ``broker.current_date()`` rather than ``date.today()`` so that in
+    backtests the "day" rolls over based on the bar timestamp, not wall clock.
+    """
+    today = broker.current_date()
     if state.last_snapshot_date != today:
         broker.snapshot_day()
         state.last_snapshot_date = today
-        logger.info("Daily equity snapshot taken.")
+        logger.info("Daily equity snapshot taken (baseline date: %s).", today)
 
 
 def _emit_cycle_metrics(
@@ -464,7 +469,10 @@ def run_once(
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
             action = "CLOSE_LONG"
         else:
-            if not broker.supports_shorting:
+            if not ALLOW_SHORTS:
+                logger.info("SELL signal — ALLOW_SHORTS=False, staying flat.")
+                action = "SKIP_SHORTS_DISABLED"
+            elif not broker.supports_shorting:
                 logger.info("SELL signal — broker does not support shorting, staying flat.")
                 action = "SKIP_NO_SHORTING"
             elif qty <= 0:

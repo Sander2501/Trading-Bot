@@ -18,7 +18,10 @@ load_dotenv()
 
 # ── Asset & timeframe ─────────────────────────────────────────────────────────
 SYMBOL: str = os.getenv("SYMBOL", "BTC/USD")
-TIMEFRAME: str = os.getenv("TIMEFRAME", "1Min")
+#: Bar interval. 15Min is the default — 1m is too noisy for this strategy on BTC
+#: (38% win rate, sub-1 profit factor in testing). Coarser bars reduce friction
+#: (fewer fills × fixed commission + slippage) and filter whipsaws.
+TIMEFRAME: str = os.getenv("TIMEFRAME", "15Min")
 
 # ── Strategy: triple EMA + MACD + ADX + RSI ──────────────────────────────────
 #: Legacy single-MA window (unused by current strategy; kept for compat).
@@ -50,7 +53,14 @@ MACD_SIGNAL_WINDOW: int = int(os.getenv("MACD_SIGNAL_WINDOW", "9"))
 #: ADX trend-strength filter.  Signals are suppressed when ADX < threshold,
 #: which eliminates most false crossovers in sideways/choppy markets.
 ADX_WINDOW: int = int(os.getenv("ADX_WINDOW", "14"))
-ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "20.0"))
+#: Raised to 25 to suppress crossover signals during sideways/chop regimes.
+#: 20 let too many low-trend-strength setups through in 30-day backtests.
+ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "25.0"))
+
+#: Allow opening short positions from flat on SELL signals.  Default is False
+#: because the strategy's short leg has historically been a net loser on BTC.
+#: Long-exit (closing an existing long on a SELL signal) is unaffected by this.
+ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "false").lower() in {"1", "true", "yes"}
 
 # ── Risk management ───────────────────────────────────────────────────────────
 # Risk profiles (set RISK_PER_TRADE env var to select):
