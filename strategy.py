@@ -73,8 +73,8 @@ def moving_average_signal(
     trend_window: int = 50,
     confirm_bars: int = 2,
     rsi_window: int = 14,
-    rsi_overbought: float = 75.0,
-    rsi_oversold: float = 25.0,
+    rsi_overbought: float = 70.0,
+    rsi_oversold: float = 30.0,
     macd_fast: int = 12,
     macd_slow: int = 26,
     macd_signal: int = 9,
@@ -82,23 +82,12 @@ def moving_average_signal(
     adx_threshold: float = 20.0,
 ) -> str:
     """
-    State-based trend-following signal tuned for BTC/USD.
+    Advanced strategy with Market Regime Detection.
 
-    BUY when ALL of:
-      - Triple EMA aligned bull (fast > slow > trend) for the last ``confirm_bars``
-        consecutive bars — single-bar alignments are usually fakeouts on 5-min data
-      - MACD histogram positive  (momentum confirms upside)
-      - ADX > adx_threshold      (genuine trend, not sideways chop)
-
-    SELL when ALL of:
-      - Triple EMA aligned bear (fast < slow < trend) for ``confirm_bars`` bars
-      - MACD histogram negative
-      - ADX > adx_threshold
-
-    RSI is logged for context but is NOT a hard entry gate.  During strong BTC
-    trends RSI stays above 80 (bull) or below 20 (bear) for hours; using it as
-    a gate caused the strategy to miss every major move.  ADX already filters
-    low-momentum, choppy environments.
+    Regimes:
+    1. TRENDING (ADX > 25): Follow EMA crossovers with MACD confirmation.
+    2. RANGING (ADX between 20-25): Use RSI pullbacks within the major trend.
+    3. SIDEWAYS (ADX < 20): Stay flat to avoid chop.
     """
     closes = bars["c"]
     highs  = bars["h"]
@@ -108,6 +97,7 @@ def moving_average_signal(
     if len(closes) < min_bars:
         return "HOLD"
 
+    latest_close = float(closes.iloc[-1])
     fast_ema  = _ema(closes, fast_window)
     slow_ema  = _ema(closes, slow_window)
     trend_ema = _ema(closes, trend_window)
@@ -120,55 +110,48 @@ def moving_average_signal(
     _, _, macd_hist = _macd(closes, macd_fast, macd_slow, macd_signal)
     adx = _adx(highs, lows, closes, adx_window)
 
-    rsi_tag = " [OVERBOUGHT]" if rsi >= rsi_overbought else " [OVERSOLD]" if rsi <= rsi_oversold else ""
+    # 1. Detect Regime
+    if adx < adx_threshold:
+        logger.info("REGIME: SIDEWAYS (ADX %.1f) | Skipping to avoid chop.", adx)
+        return "HOLD"
+    
+    regime = "TRENDING" if adx > 25 else "RANGING"
+    
+    # 2. Detect Primary Trend
+    trend = "BULL" if latest_close > curr_trend else "BEAR"
+
     logger.info(
-        "indicators | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f%s macd_hist=%.2f adx=%.1f",
-        curr_fast, curr_slow, curr_trend, rsi, rsi_tag, macd_hist, adx,
+        "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f",
+        regime, trend, curr_fast, curr_slow, curr_trend, rsi, macd_hist, adx,
     )
 
-    if adx < adx_threshold:
-        logger.info("HOLD reason: ADX %.1f < threshold %.1f (choppy market)", adx, adx_threshold)
-        return "HOLD"
+    # 3. Signal Logic
+    if regime == "TRENDING":
+        bull_now = curr_fast > curr_slow > curr_trend
+        bear_now = curr_fast < curr_slow < curr_trend
 
-    bull_now  = curr_fast > curr_slow > curr_trend
-    bear_now  = curr_fast < curr_slow < curr_trend
+        if confirm_bars > 1:
+            lookback_f = fast_ema.iloc[-(confirm_bars + 1):-1]
+            lookback_s = slow_ema.iloc[-(confirm_bars + 1):-1]
+            lookback_t = trend_ema.iloc[-(confirm_bars + 1):-1]
+            bull_persistent = bull_now and all(f > s > t for f, s, t in zip(lookback_f, lookback_s, lookback_t))
+            bear_persistent = bear_now and all(f < s < t for f, s, t in zip(lookback_f, lookback_s, lookback_t))
+        else:
+            bull_persistent = bull_now
+            bear_persistent = bear_now
 
-    # Require alignment to have held for `confirm_bars` consecutive prior bars
-    # so the strategy only enters after a trend is confirmed, not on the first bar.
-    if confirm_bars > 1:
-        lookback_f = fast_ema.iloc[-(confirm_bars + 1):-1]
-        lookback_s = slow_ema.iloc[-(confirm_bars + 1):-1]
-        lookback_t = trend_ema.iloc[-(confirm_bars + 1):-1]
-        bull_persistent = bull_now and all(
-            f > s > t for f, s, t in zip(lookback_f, lookback_s, lookback_t)
-        )
-        bear_persistent = bear_now and all(
-            f < s < t for f, s, t in zip(lookback_f, lookback_s, lookback_t)
-        )
-    else:
-        bull_persistent = bull_now
-        bear_persistent = bear_now
+        if bull_persistent and macd_hist > 0:
+            return "BUY"
+        if bear_persistent and macd_hist < 0:
+            return "SELL"
 
-    if bull_persistent and macd_hist > 0:
-        return "BUY"
-
-    if bear_persistent and macd_hist < 0:
-        return "SELL"
-
-    # Log the specific blocker
-    if bull_now and not bull_persistent:
-        logger.info("HOLD reason: bull alignment is NEW (needs %d consecutive bars)", confirm_bars)
-    elif bull_persistent:
-        logger.info("HOLD reason: bull EMA aligned but MACD hist=%.2f (needs >0)", macd_hist)
-    elif bear_now and not bear_persistent:
-        logger.info("HOLD reason: bear alignment is NEW (needs %d consecutive bars)", confirm_bars)
-    elif bear_persistent:
-        logger.info("HOLD reason: bear EMA aligned but MACD hist=%.2f (needs <0)", macd_hist)
-    else:
-        ema_state = (
-            f"mixed (fast={'>' if curr_fast > curr_slow else '<'}slow, "
-            f"slow={'>' if curr_slow > curr_trend else '<'}trend)"
-        )
-        logger.info("HOLD reason: EMA not aligned — %s", ema_state)
+    elif regime == "RANGING":
+        # RSI Pullback logic: Buy the dip in an uptrend, sell the spike in a downtrend
+        if trend == "BULL" and rsi <= rsi_oversold:
+            logger.info("SIGNAL: RSI PULLBACK BUY (RSI %.1f in BULL trend)", rsi)
+            return "BUY"
+        if trend == "BEAR" and rsi >= rsi_overbought:
+            logger.info("SIGNAL: RSI PULLBACK SELL (RSI %.1f in BEAR trend)", rsi)
+            return "SELL"
 
     return "HOLD"

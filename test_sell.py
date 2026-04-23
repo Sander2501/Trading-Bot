@@ -40,24 +40,24 @@ def main():
     sl_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
     tp_dist = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
     
-    sl_price = round(latest_price - sl_dist, 2)
-    tp_price = round(latest_price + tp_dist, 2)
+    sl_price = round(latest_price + sl_dist, 2)
+    tp_price = round(latest_price - tp_dist, 2)
 
-    print(f"\nAttempting to BUY {test_qty} {symbol} @ ~{latest_price:.2f}...")
+    print(f"\nAttempting to SELL/SHORT {test_qty} {symbol} @ ~{latest_price:.2f}...")
     print(f"Proposed SL: {sl_price:.2f}")
     print(f"Proposed TP: {tp_price:.2f}")
 
     try:
-        broker.submit_buy(symbol, test_qty, sl=sl_price, tp=tp_price)
-        print("SUCCESS: Market BUY order submitted without errors!")
+        broker.submit_sell(symbol, test_qty, sl=sl_price, tp=tp_price)
+        print("SUCCESS: Market SELL/SHORT order submitted without errors!")
         
         print("Waiting for order to fill...")
         for _ in range(5):
             time.sleep(2)
             broker.flush_position_cache()
             pos_qty = broker.get_position_qty(symbol)
-            if pos_qty > 0:
-                print(f"Current held quantity of {symbol}: {pos_qty}")
+            if pos_qty < 0:
+                print(f"Current held quantity of {symbol}: {pos_qty} (Short)")
                 break
         else:
             print(f"Order for {symbol} not filled yet or position not found after 10 seconds.")

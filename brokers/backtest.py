@@ -3,7 +3,7 @@ brokers.backtest
 ~~~~~~~~~~~~~~~~
 Simulated broker that replays a CSV of historical price bars.
 
-Designed to be a drop-in replacement for CapitalBroker so that the exact same
+Designed to be a drop-in replacement for AlpacaBroker so that the exact same
 ``run_once`` loop from ``main.py`` can be used for both live trading and
 offline backtesting without any code changes.
 """
@@ -47,24 +47,10 @@ class BacktestBroker(BaseBroker):
         slippage_pct: float = 0.0005,
         commission_per_trade: float = 0.0,
     ) -> None:
-        if starting_cash <= 0:
-            raise ValueError(f"starting_cash must be > 0, got {starting_cash}")
-        if not (0 <= slippage_pct <= 0.1):
-            raise ValueError(f"slippage_pct must be between 0 and 0.1, got {slippage_pct}")
-        if commission_per_trade < 0:
-            raise ValueError(f"commission_per_trade must be >= 0, got {commission_per_trade}")
-
         df = pd.read_csv(csv_path)
 
         if "c" not in df.columns:
             raise ValueError("CSV must contain a 'c' column for close prices.")
-
-        required_numeric = [col for col in ("c", "h", "l") if col in df.columns]
-        for col in required_numeric:
-            if not pd.api.types.is_numeric_dtype(df[col]):
-                raise ValueError(
-                    f"CSV column '{col}' must be numeric, got dtype {df[col].dtype}"
-                )
 
         if "t" in df.columns:
             df = df.sort_values("t").reset_index(drop=True)
@@ -106,6 +92,7 @@ class BacktestBroker(BaseBroker):
     def done(self) -> bool:
         """Return ``True`` when all bars have been processed."""
         return self._cursor >= len(self._closes)
+
     # ------------------------------------------------------------------
     # Market data
     # ------------------------------------------------------------------

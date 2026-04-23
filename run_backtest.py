@@ -15,7 +15,7 @@ performance report.
 import statistics
 
 from brokers import BacktestBroker
-from config import CSV_PATH, STARTING_CASH, SYMBOL
+from config import CSV_PATH, STARTING_CASH, SYMBOL, SLIPPAGE_PCT, COMMISSION_PER_TRADE
 from main import run_once
 
 
@@ -116,6 +116,8 @@ def main() -> None:
         csv_path=CSV_PATH,
         symbol=SYMBOL,
         starting_cash=STARTING_CASH,
+        slippage_pct=SLIPPAGE_PCT,
+        commission_per_trade=COMMISSION_PER_TRADE,
     )
 
     # Replay every bar through the same run_once logic used in live trading.

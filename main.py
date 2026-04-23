@@ -37,6 +37,8 @@ from config import (
     RISK_PER_TRADE,
     SLOW_WINDOW,
     STOP_LOSS_PCT,
+    TAKE_PROFIT_MULT,
+    TAKE_PROFIT_PCT,
     SYMBOL,
     TIMEFRAME,
     TREND_WINDOW,
@@ -261,9 +263,20 @@ def run_once(
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
             else:
-                broker.submit_buy(SYMBOL, qty)
+                # Calculate SL/TP for the new LONG position
+                atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
+                sl_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
+                tp_dist = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
+                
+                sl_price = round(latest_price - sl_dist, 2)
+                tp_price = round(latest_price + tp_dist, 2)
+
+                broker.submit_buy(SYMBOL, qty, sl=sl_price, tp=tp_price)
                 state.position_high = latest_price
-                logger.info(f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+                logger.info(
+                    f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
+                    f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
+                )
 
     elif signal == "SELL":
         if current_qty < 0:
@@ -279,9 +292,20 @@ def run_once(
             elif qty <= 0:
                 logger.info("Insufficient equity to open short.")
             else:
-                broker.submit_sell(SYMBOL, qty)
+                # Calculate SL/TP for the new SHORT position
+                atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
+                sl_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
+                tp_dist = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
+
+                sl_price = round(latest_price + sl_dist, 2)
+                tp_price = round(latest_price - tp_dist, 2)
+
+                broker.submit_sell(SYMBOL, qty, sl=sl_price, tp=tp_price)
                 state.position_low = latest_price
-                logger.info(f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+                logger.info(
+                    f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
+                    f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
+                )
 
     else:
         logger.info("No action.")

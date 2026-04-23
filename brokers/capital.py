@@ -249,7 +249,7 @@ class CapitalBroker(BaseBroker):
         orders = self._get("/api/v1/workingorders").json().get("workingOrders", [])
         return any(o.get("workingOrderData", {}).get("epic") == epic for o in orders)
 
-    def submit_buy(self, symbol: str, qty: float) -> None:
+    def submit_buy(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
         """
         Open a long, or close an existing short.
         Uses the cached position to avoid an extra API round-trip.
@@ -258,15 +258,20 @@ class CapitalBroker(BaseBroker):
         if pos and pos.get("direction") == "SELL":
             self._delete(f"/api/v1/positions/{pos['dealId']}")
         else:
-            self._post("/api/v1/positions", {
+            body = {
                 "epic":          _EPIC_MAP.get(symbol, symbol),
                 "direction":     "BUY",
                 "size":          qty,
                 "guaranteedStop": False,
-            })
+            }
+            if sl:
+                body["stopLevel"] = sl
+            if tp:
+                body["profitLevel"] = tp
+            self._post("/api/v1/positions", body)
         self._position_cache = None
 
-    def submit_sell(self, symbol: str, qty: float) -> None:
+    def submit_sell(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
         """
         Close an existing long, or open a short.
         Uses the cached position to avoid an extra API round-trip.
@@ -275,12 +280,17 @@ class CapitalBroker(BaseBroker):
         if pos and pos.get("direction") == "BUY":
             self._delete(f"/api/v1/positions/{pos['dealId']}")
         else:
-            self._post("/api/v1/positions", {
+            body = {
                 "epic":          _EPIC_MAP.get(symbol, symbol),
                 "direction":     "SELL",
                 "size":          qty,
                 "guaranteedStop": False,
-            })
+            }
+            if sl:
+                body["stopLevel"] = sl
+            if tp:
+                body["profitLevel"] = tp
+            self._post("/api/v1/positions", body)
         self._position_cache = None
 
     # ------------------------------------------------------------------

@@ -54,7 +54,7 @@ ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "20.0"))
 
 # ── Risk management ───────────────────────────────────────────────────────────
 #: Fraction of current equity to allocate per trade.
-RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
+RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "1.50"))
 
 #: ATR-based stop: exit when price falls more than ATR_STOP_MULT × ATR below entry.
 #: A multiplier of 2.0 gives the trade enough room to breathe on BTC 1-min noise
@@ -65,8 +65,21 @@ ATR_STOP_WINDOW: int = int(os.getenv("ATR_STOP_WINDOW", "14"))
 #: Minimum stop distance as a fraction of entry price (floor for low-volatility periods).
 STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "0.005"))
 
+#: ATR-based take profit: exit when price rises more than TAKE_PROFIT_MULT × ATR above entry.
+TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "4.0"))
+
+#: Target profit as a fraction of entry price (floor for high-conviction trades).
+TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
+
 #: Halt trading for the day once intraday drawdown exceeds this threshold.
 MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.03"))
+
+# ── Backtest Realism ──────────────────────────────────────────────────────────
+#: Fraction of the close price added (buys) or subtracted (sells) to simulate spread.
+SLIPPAGE_PCT: float = float(os.getenv("SLIPPAGE_PCT", "0.0005"))
+
+#: Flat fee in USD deducted from each fill.
+COMMISSION_PER_TRADE: float = float(os.getenv("COMMISSION_PER_TRADE", "0.10"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 #: Seconds to sleep between each ``run_once`` cycle.
@@ -108,9 +121,9 @@ def validate_config() -> None:
             f"RSI thresholds must satisfy 0 < RSI_OVERSOLD ({RSI_OVERSOLD}) "
             f"< RSI_OVERBOUGHT ({RSI_OVERBOUGHT}) < 100"
         )
-    if not (0 < RISK_PER_TRADE <= 0.5):
+    if not (0 < RISK_PER_TRADE <= 10.0):
         raise ValueError(
-            f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 0.5]; "
+            f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 10.0]; "
             f"got {RISK_PER_TRADE * 100:.1f}%"
         )
     if MAX_DAILY_LOSS_PCT <= 0 or MAX_DAILY_LOSS_PCT > 1:
@@ -119,6 +132,10 @@ def validate_config() -> None:
         )
     if STOP_LOSS_PCT < 0:
         raise ValueError(f"STOP_LOSS_PCT ({STOP_LOSS_PCT}) must be >= 0")
+    if TAKE_PROFIT_PCT < 0:
+        raise ValueError(f"TAKE_PROFIT_PCT ({TAKE_PROFIT_PCT}) must be >= 0")
+    if TAKE_PROFIT_MULT <= 0:
+        raise ValueError(f"TAKE_PROFIT_MULT ({TAKE_PROFIT_MULT}) must be > 0")
     if ATR_STOP_MULT <= 0:
         raise ValueError(f"ATR_STOP_MULT ({ATR_STOP_MULT}) must be > 0")
     if STARTING_CASH <= 0:

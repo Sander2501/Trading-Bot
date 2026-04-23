@@ -59,13 +59,13 @@ class BaseBroker(ABC):
         pass
 
     @abstractmethod
-    def submit_buy(self, symbol: str, qty: float) -> None:
-        """Submit a market buy order for ``qty`` units of ``symbol``."""
+    def submit_buy(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
+        """Submit a market buy order for ``qty`` units of ``symbol`` with optional SL/TP."""
         pass
 
     @abstractmethod
-    def submit_sell(self, symbol: str, qty: float) -> None:
-        """Submit a market sell order for ``qty`` units of ``symbol``."""
+    def submit_sell(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
+        """Submit a market sell order for ``qty`` units of ``symbol`` with optional SL/TP."""
         pass
 
     # ------------------------------------------------------------------
