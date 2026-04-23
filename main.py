@@ -17,9 +17,10 @@ to the configured risk parameters.  It runs in an infinite loop, sleeping
 import argparse
 import json
 import logging
-import json
 import time
 from datetime import date, datetime, timezone
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from brokers import CapitalBroker, BaseBroker
 from config import (
@@ -426,7 +427,7 @@ def run_once(
                 return
 
     # --- Signal execution ---
-    qty = position_size(equity, latest_price)
+    qty = position_size(equity, stop_dist, latest_price)
     action = "HOLD"
 
     if signal == "BUY":
