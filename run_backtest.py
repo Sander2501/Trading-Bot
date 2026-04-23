@@ -60,7 +60,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         side = t["side"]
 
         # BUY/COVER: close existing short lots first, then open long lots.
-        if side in {"BUY", "COVER"}:
+        if side in {"BUY", "COVER", "SL_STOP", "TP_STOP"} and short_lots:
             qty_left = qty
             while qty_left > 0 and short_lots:
                 lot_qty, lot_price = short_lots[0]
@@ -78,9 +78,11 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
                     short_lots[0] = (lot_qty, lot_price)
             if qty_left > 0:
                 long_lots.append((qty_left, price))
+        elif side in {"BUY", "COVER"}:
+            long_lots.append((qty, price))
 
         # SELL/SHORT: close existing long lots first, then open short lots.
-        elif side in {"SELL", "SHORT"}:
+        elif side in {"SELL", "SHORT", "SL_STOP", "TP_STOP"} and long_lots:
             qty_left = qty
             while qty_left > 0 and long_lots:
                 lot_qty, lot_price = long_lots[0]
@@ -98,6 +100,8 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
                     long_lots[0] = (lot_qty, lot_price)
             if qty_left > 0:
                 short_lots.append((qty_left, price))
+        elif side in {"SELL", "SHORT"}:
+            short_lots.append((qty, price))
 
     total_trips = len(wins) + len(losses)
     win_rate = len(wins) / total_trips * 100 if total_trips > 0 else 0.0
