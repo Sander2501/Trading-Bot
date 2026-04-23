@@ -19,9 +19,16 @@ from datetime import date
 
 from brokers import AlpacaBroker, BaseBroker
 from config import (
+    ADX_THRESHOLD,
+    ADX_WINDOW,
+    ATR_STOP_MULT,
+    ATR_STOP_WINDOW,
     CHECK_INTERVAL_SECONDS,
     CONFIRM_BARS,
     FAST_WINDOW,
+    MACD_FAST,
+    MACD_SIGNAL_WINDOW,
+    MACD_SLOW,
     MAX_BACKOFF_SECONDS,
     MAX_DAILY_LOSS_PCT,
     RSI_OVERBOUGHT,
@@ -32,9 +39,10 @@ from config import (
     STOP_LOSS_PCT,
     SYMBOL,
     TIMEFRAME,
+    TREND_WINDOW,
     WINDOW,
 )
-from strategy import moving_average_signal
+from strategy import atr_stop_distance, moving_average_signal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -119,8 +127,8 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
             time.sleep(3600)
         return
 
-    # Fetch enough bars for EMA + RSI warm-up plus a small safety buffer
-    bars_needed = max(SLOW_WINDOW, RSI_WINDOW) * 2 + CONFIRM_BARS + 5
+    # Fetch enough bars for all indicators to warm up
+    bars_needed = max(TREND_WINDOW, MACD_SLOW, RSI_WINDOW) * 2 + CONFIRM_BARS + 5
     closes = broker.get_recent_closes(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
 
     latest_price = float(closes.iloc[-1])
@@ -130,9 +138,15 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
         confirm_bars=CONFIRM_BARS,
         fast_window=FAST_WINDOW,
         slow_window=SLOW_WINDOW,
+        trend_window=TREND_WINDOW,
         rsi_window=RSI_WINDOW,
         rsi_overbought=RSI_OVERBOUGHT,
         rsi_oversold=RSI_OVERSOLD,
+        macd_fast=MACD_FAST,
+        macd_slow=MACD_SLOW,
+        macd_signal=MACD_SIGNAL_WINDOW,
+        adx_window=ADX_WINDOW,
+        adx_threshold=ADX_THRESHOLD,
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
@@ -148,18 +162,23 @@ def run_once(broker: BaseBroker, sleep_enabled: bool = True) -> None:
             time.sleep(CHECK_INTERVAL_SECONDS)
         return
 
-    # --- Stop-loss check ---
+    # --- ATR-based stop-loss (floor: STOP_LOSS_PCT × entry) ---
     if current_qty > 0:
         entry_price = broker.get_entry_price(SYMBOL)
-        if entry_price and latest_price <= entry_price * (1 - STOP_LOSS_PCT):
-            broker.submit_sell(SYMBOL, current_qty)
-            logger.warning(
-                f"STOP LOSS triggered: sold {current_qty:.6f} {SYMBOL} "
-                f"at {latest_price:.2f} (entry {entry_price:.2f})"
-            )
-            if sleep_enabled:
-                time.sleep(CHECK_INTERVAL_SECONDS)
-            return
+        if entry_price:
+            atr_stop = atr_stop_distance(closes, window=ATR_STOP_WINDOW, multiplier=ATR_STOP_MULT)
+            stop_floor = entry_price * STOP_LOSS_PCT
+            stop_distance = max(atr_stop, stop_floor)
+            if latest_price <= entry_price - stop_distance:
+                broker.submit_sell(SYMBOL, current_qty)
+                logger.warning(
+                    f"STOP LOSS triggered: sold {current_qty:.6f} {SYMBOL} "
+                    f"at {latest_price:.2f} (entry {entry_price:.2f}, "
+                    f"stop_dist={stop_distance:.2f})"
+                )
+                if sleep_enabled:
+                    time.sleep(CHECK_INTERVAL_SECONDS)
+                return
 
     # --- Signal execution ---
     equity, _ = broker.get_equity()

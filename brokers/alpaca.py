@@ -23,8 +23,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Alpaca crypto bars endpoint
+# Alpaca crypto data endpoints
 _BARS_URL = "https://data.alpaca.markets/v1beta3/crypto/us/bars"
+_LATEST_QUOTES_URL = "https://data.alpaca.markets/v1beta3/crypto/us/latest/quotes"
 _MAX_HTTP_ATTEMPTS = 3
 
 # HTTP status codes that must NOT be retried (permanent client errors)
@@ -149,13 +150,24 @@ class AlpacaBroker(BaseBroker):
         latest_ts = datetime.fromisoformat(latest_bar["t"].replace("Z", "+00:00"))
         age_minutes = (now - latest_ts).total_seconds() / 60
 
+        closes_list = [bar["c"] for bar in bars]
+
         if age_minutes > _DATA_STALENESS_WARN_MINUTES:
-            logger.warning(
-                "Bar data is %.0f min old (latest bar: %s). "
-                "Alpaca may have a data feed delay or outage.",
-                age_minutes,
-                latest_bar["t"],
-            )
+            fresh_price = self._get_current_price(symbol)
+            if fresh_price is not None:
+                closes_list.append(fresh_price)
+                logger.debug(
+                    "Bar data is %.0f min old; appended real-time quote %.2f.",
+                    age_minutes,
+                    fresh_price,
+                )
+            else:
+                logger.warning(
+                    "Bar data is %.0f min old (latest bar: %s). "
+                    "Alpaca may have a data feed delay or outage.",
+                    age_minutes,
+                    latest_bar["t"],
+                )
         else:
             logger.debug(
                 "Latest bar  ts=%s  close=%.2f  age=%.1fmin  (%d bars)",
@@ -165,7 +177,24 @@ class AlpacaBroker(BaseBroker):
                 len(bars),
             )
 
-        return pd.Series([bar["c"] for bar in bars], dtype=float)
+        return pd.Series(closes_list, dtype=float)
+
+    def _get_current_price(self, symbol: str) -> float | None:
+        """Return a real-time mid-price from the latest quotes endpoint."""
+        try:
+            payload = self._get_with_retry(
+                _LATEST_QUOTES_URL, {"symbols": symbol}
+            ).json()
+            quote = payload.get("quotes", {}).get(symbol)
+            if quote:
+                ask = float(quote.get("ap", 0))
+                bid = float(quote.get("bp", 0))
+                if ask > 0 and bid > 0:
+                    return (ask + bid) / 2.0
+                return ask if ask > 0 else (bid if bid > 0 else None)
+        except Exception:
+            logger.debug("Latest quote unavailable; using bar close as current price.")
+        return None
 
     def _get_with_retry(self, url: str, params: dict) -> requests.Response:
         """
