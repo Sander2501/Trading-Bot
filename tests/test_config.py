@@ -29,6 +29,7 @@ class TestValidateConfig:
             "TREND_WINDOW":      50,
             "RSI_OVERSOLD":      25.0,
             "RSI_OVERBOUGHT":    75.0,
+            "MIN_ATR_PCT":       0.001,
             "RISK_PER_TRADE":    0.02,
             "MAX_DAILY_LOSS_PCT": 0.03,
             "STOP_LOSS_PCT":     0.005,
@@ -122,6 +123,15 @@ class TestValidateConfig:
     def test_starting_cash_negative_raises(self):
         with pytest.raises(ValueError, match="BACKTEST_STARTING_CASH"):
             self._patched_validate({"STARTING_CASH": -500.0})
+
+
+    def test_min_atr_pct_negative_raises(self):
+        with pytest.raises(ValueError, match="MIN_ATR_PCT"):
+            self._patched_validate({"MIN_ATR_PCT": -0.01})
+
+    def test_min_atr_pct_one_or_more_raises(self):
+        with pytest.raises(ValueError, match="MIN_ATR_PCT"):
+            self._patched_validate({"MIN_ATR_PCT": 1.0})
 
     def test_boundary_risk_per_trade_max_passes(self):
         """RISK_PER_TRADE of exactly 0.10 (hard cap) should be allowed."""

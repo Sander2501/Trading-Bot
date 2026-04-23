@@ -57,6 +57,10 @@ ADX_WINDOW: int = int(os.getenv("ADX_WINDOW", "14"))
 #: 20 let too many low-trend-strength setups through in 30-day backtests.
 ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "25.0"))
 
+#: Volatility floor (ATR / price). Suppress new signals when volatility is too low
+#: to cover spread/fees; helps reduce overtrading in micro-chop regimes.
+MIN_ATR_PCT: float = float(os.getenv("MIN_ATR_PCT", "0.001"))
+
 #: Allow opening short positions from flat on SELL signals.  Default is False
 #: because the strategy's short leg has historically been a net loser on BTC.
 #: Long-exit (closing an existing long on a SELL signal) is unaffected by this.
@@ -161,6 +165,10 @@ def validate_config() -> None:
         raise ValueError(
             f"RSI thresholds must satisfy 0 < RSI_OVERSOLD ({RSI_OVERSOLD}) "
             f"< RSI_OVERBOUGHT ({RSI_OVERBOUGHT}) < 100"
+        )
+    if not (0 <= MIN_ATR_PCT < 1):
+        raise ValueError(
+            f"MIN_ATR_PCT ({MIN_ATR_PCT}) must be in [0, 1)"
         )
     if not (0 < RISK_PER_TRADE <= 0.10):
         raise ValueError(
