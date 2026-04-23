@@ -92,7 +92,7 @@ Copy `.env.example` to `.env` and edit the values:
 | `CAPITAL_PASSWORD` | — | Your Capital.com password |
 | `CAPITAL_USE_DEMO` | `true` | Use demo environment (recommended) |
 | `SYMBOL` | `BTC/USD` | Trading symbol |
-| `TIMEFRAME` | `1Min` | Bar timeframe |
+| `TIMEFRAME` | `15Min` | Bar timeframe |
 | `RISK_PER_TRADE` | `0.02` | Fraction of equity per trade (see Risk Profiles) |
 | `MAX_CONSECUTIVE_ERRORS` | `5` | Consecutive bot-cycle errors before cooldown circuit breaker |
 | `ERROR_COOLDOWN_SECONDS` | `900` | Cooldown duration after circuit breaker trips |
@@ -155,7 +155,7 @@ The strategy uses a **triple-EMA trend filter** with **MACD**, **ADX**, and **RS
 | Slow EMA (21) | Medium-term direction | `SLOW_WINDOW=21` |
 | Trend EMA (50) | Long-term bias | `TREND_WINDOW=50` |
 | MACD histogram | Confirms momentum direction | Fast=12, Slow=26, Signal=9 |
-| ADX | Regime filter — suppresses choppy signals | `ADX_THRESHOLD=20` |
+| ADX | Regime filter — suppresses choppy signals | `ADX_THRESHOLD=25` |
 | RSI | Entry timing (buy dips, sell spikes) | `RSI_WINDOW=14` |
 
 **Signal logic:**
@@ -170,6 +170,9 @@ The strategy uses a **triple-EMA trend filter** with **MACD**, **ADX**, and **RS
    - RSI oversold → `BUY`; RSI overbought → `SELL`
 
 **Exit logic:** ATR-based trailing stop + fixed take-profit target.
+
+> Regime note: the ADX gate is configurable via `ADX_THRESHOLD`; "TRENDING" is
+> currently tagged when `ADX > 25` in logs.
 
 ---
 
@@ -212,7 +215,7 @@ python run_backtest.py
 
 | Parameter | Conservative | Default | Aggressive |
 |---|---|---|---|
-| `ADX_THRESHOLD` | 25 | 20 | 15 |
+| `ADX_THRESHOLD` | 30 | 25 | 20 |
 | `CONFIRM_BARS` | 3 | 2 | 1 |
 | `ATR_STOP_MULT` | 3.0 | 2.0 | 1.5 |
 | `RISK_PER_TRADE` | 0.01 | 0.02 | 0.05 |
@@ -234,8 +237,38 @@ python run_backtest.py
 - **Market hours:** The bot skips cycles when the market is closed (Capital.com CFD hours). Crypto markets run 24/7, but the broker may have weekend gaps.
 - **Shorting support:** Short selling (`SELL` signals opening new shorts) requires broker support. Capital.com CFDs support shorting; other brokers may not. Check `BaseBroker.supports_shorting`.
 - **Backtest vs live differences:** Backtests use a fixed slippage estimate (`SLIPPAGE_PCT=0.0005`). Live trading may experience higher slippage during volatile periods. Commission defaults to $0.10/trade in backtest.
-- **1-minute bars:** Strategy defaults to 1-minute timeframe. Longer timeframes reduce noise but require more historical data.
+- **15-minute bars:** Strategy defaults to 15-minute timeframe. Shorter bars are noisier and can increase overtrading.
 - **No guarantee of profit:** Past backtest performance does not guarantee future live results.
+
+---
+
+
+### Windows PowerShell quick commands
+
+If you are on PowerShell (like `PS C:\...`), use PowerShell-native commands instead of Unix ones:
+
+```powershell
+# from repo root (folder that contains requirements.txt)
+cd C:\path\to\Trading-Bot
+
+# activate venv
+.\.venv\Scripts\Activate.ps1
+
+# inspect proxy-related env vars
+Get-ChildItem Env: | Where-Object { $_.Name -match 'PIP|HTTP_PROXY|HTTPS_PROXY|NO_PROXY' }
+
+# clear proxy vars for current shell session (optional)
+Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
+Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+Remove-Item Env:ALL_PROXY -ErrorAction SilentlyContinue
+
+# install deps + run tests
+python -m pip install -r requirements.txt
+pytest -q
+```
+
+> If you see `Could not open requirements file`, you are in the wrong directory.
+> Run `Get-ChildItem` and confirm `requirements.txt` is present before installing.
 
 ---
 
@@ -244,6 +277,7 @@ python run_backtest.py
 | Problem | Solution |
 |---|---|
 | `ModuleNotFoundError: No module named 'pandas'` | Run `pip install -r requirements.txt` |
+| `Could not open requirements file: requirements.txt` | `cd` into the repo root first (the folder containing `requirements.txt`) and retry |
 | `Missing CAPITAL_API_KEY` | Create `.env` from `.env.example` and fill credentials |
 | `FileNotFoundError: historical_data.csv` | Provide a CSV with at least a `c` (close) column |
 | Signal stays `HOLD` forever | ADX may be low (choppy market). Lower `ADX_THRESHOLD` or wait for a trending period |
@@ -275,3 +309,23 @@ pytest tests/test_strategy.py -v
 ```
 
 Tests run automatically on every push and pull request via GitHub Actions.
+
+---
+
+## Advanced Validation & Optimization
+
+### Walk-forward validation
+
+```bash
+python scripts/walk_forward.py --csv historical_data.csv --train-bars 8000 --test-bars 4000
+```
+
+Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD plus averages.
+
+### Parameter robustness sweep
+
+```bash
+python scripts/sweep_params.py
+```
+
+Produces `sweep_report.json` with ranked parameter combinations.

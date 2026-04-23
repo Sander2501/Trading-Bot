@@ -37,9 +37,13 @@ from config import (
     MACD_SIGNAL_WINDOW,
     MACD_SLOW,
     MAX_BACKOFF_SECONDS,
+    MAX_GROSS_EXPOSURE_PCT,
+    MIN_ATR_PCT,
     MAX_CONSECUTIVE_ERRORS,
     MAX_DAILY_LOSS_PCT,
+    MAX_ORDER_ERRORS,
     OPEN_ORDER_STALE_CYCLES,
+    ORDER_ERROR_COOLDOWN_SECONDS,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
     RSI_WINDOW,
@@ -102,6 +106,7 @@ class TradingState:
         self.last_snapshot_date: date | None = None
         self.open_order_streak: int = 0
         self.cycles: int = 0
+        self.order_error_streak: int = 0
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
@@ -210,10 +215,36 @@ def position_size(equity: float, stop_distance: float, price: float) -> float:
     if stop_distance <= 0 or price <= 0:
         return 0.0
     qty_by_risk  = (equity * RISK_PER_TRADE) / stop_distance
+    qty_by_exposure = equity * MAX_GROSS_EXPOSURE_PCT / (price * (1 + SLIPPAGE_PCT))
     # Cap at 99.9% of equity divided by worst-case fill price to ensure the
     # order cost stays within available cash after slippage and float rounding.
     qty_by_funds = equity * 0.999 / (price * (1 + SLIPPAGE_PCT))
-    return round(max(0.0, min(qty_by_risk, qty_by_funds)), 6)
+    return round(max(0.0, min(qty_by_risk, qty_by_funds, qty_by_exposure)), 6)
+
+
+def _submit_with_guard(
+    submit_fn,
+    state: TradingState,
+    description: str,
+    sleep_enabled: bool,
+) -> bool:
+    """Submit an order and apply an error circuit-breaker on repeated failures."""
+    try:
+        submit_fn()
+        state.order_error_streak = 0
+        return True
+    except Exception as exc:
+        state.order_error_streak += 1
+        logger.exception("Order submission failed (%s): %s", description, exc)
+        if state.order_error_streak >= MAX_ORDER_ERRORS:
+            logger.error(
+                "Order error circuit-breaker tripped (%d consecutive errors). Cooling down %ds.",
+                state.order_error_streak,
+                ORDER_ERROR_COOLDOWN_SECONDS,
+            )
+            if sleep_enabled:
+                time.sleep(ORDER_ERROR_COOLDOWN_SECONDS)
+        return False
 
 
 def daily_loss_exceeded(broker: BaseBroker) -> bool:
@@ -358,6 +389,7 @@ def run_once(
         macd_signal=MACD_SIGNAL_WINDOW,
         adx_window=ADX_WINDOW,
         adx_threshold=ADX_THRESHOLD,
+        min_atr_pct=MIN_ATR_PCT,
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
@@ -411,11 +443,27 @@ def run_once(
 
             if exit_reason:
                 if current_qty > 0:
-                    broker.submit_sell(SYMBOL, current_qty)
+                    ok = _submit_with_guard(
+                        lambda: broker.submit_sell(SYMBOL, current_qty),
+                        state,
+                        "exit long",
+                        sleep_enabled,
+                    )
                     ref = state.position_high
                 else:
-                    broker.submit_buy(SYMBOL, abs(current_qty))
+                    ok = _submit_with_guard(
+                        lambda: broker.submit_buy(SYMBOL, abs(current_qty)),
+                        state,
+                        "exit short",
+                        sleep_enabled,
+                    )
                     ref = state.position_low
+                if not ok:
+                    _emit_cycle_metrics(
+                        state, latest_price, signal, current_qty, "ORDER_ERROR_EXIT",
+                        open_order_exists, equity
+                    )
+                    return
 
                 state.reset_watermarks(latest_price)
                 logger.warning(
@@ -440,7 +488,16 @@ def run_once(
             logger.info("Already long — holding.")
         elif current_qty < 0:
             # Cover short first; next cycle opens the long if signal persists
-            broker.submit_buy(SYMBOL, abs(current_qty))
+            if not _submit_with_guard(
+                lambda: broker.submit_buy(SYMBOL, abs(current_qty)),
+                state,
+                "cover short",
+                sleep_enabled,
+            ):
+                _emit_cycle_metrics(
+                    state, latest_price, signal, current_qty, "ORDER_ERROR_COVER", open_order_exists, equity
+                )
+                return
             state.reset_watermarks(latest_price)
             logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
             action = "COVER_SHORT"
@@ -451,7 +508,16 @@ def run_once(
             else:
                 sl_price = round(latest_price - stop_dist, 8)
                 tp_price = round(latest_price + tp_dist, 8)
-                broker.submit_buy(SYMBOL, qty, sl=sl_price, tp=tp_price)
+                if not _submit_with_guard(
+                    lambda: broker.submit_buy(SYMBOL, qty, sl=sl_price, tp=tp_price),
+                    state,
+                    "open long",
+                    sleep_enabled,
+                ):
+                    _emit_cycle_metrics(
+                        state, latest_price, signal, current_qty, "ORDER_ERROR_OPEN_LONG", open_order_exists, equity
+                    )
+                    return
                 state.position_high = latest_price
                 logger.info(
                     f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
@@ -464,7 +530,16 @@ def run_once(
             logger.info("Already short — holding.")
         elif current_qty > 0:
             # Close long first; next cycle opens the short if signal persists
-            broker.submit_sell(SYMBOL, current_qty)
+            if not _submit_with_guard(
+                lambda: broker.submit_sell(SYMBOL, current_qty),
+                state,
+                "close long",
+                sleep_enabled,
+            ):
+                _emit_cycle_metrics(
+                    state, latest_price, signal, current_qty, "ORDER_ERROR_CLOSE_LONG", open_order_exists, equity
+                )
+                return
             state.reset_watermarks(latest_price)
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
             action = "CLOSE_LONG"
@@ -481,7 +556,16 @@ def run_once(
             else:
                 sl_price = round(latest_price + stop_dist, 8)
                 tp_price = round(latest_price - tp_dist, 8)
-                broker.submit_sell(SYMBOL, qty, sl=sl_price, tp=tp_price)
+                if not _submit_with_guard(
+                    lambda: broker.submit_sell(SYMBOL, qty, sl=sl_price, tp=tp_price),
+                    state,
+                    "open short",
+                    sleep_enabled,
+                ):
+                    _emit_cycle_metrics(
+                        state, latest_price, signal, current_qty, "ORDER_ERROR_OPEN_SHORT", open_order_exists, equity
+                    )
+                    return
                 state.position_low = latest_price
                 logger.info(
                     f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "

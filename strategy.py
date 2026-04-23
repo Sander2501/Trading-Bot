@@ -80,6 +80,7 @@ def moving_average_signal(
     macd_signal: int = 9,
     adx_window: int = 14,
     adx_threshold: float = 20.0,
+    min_atr_pct: float = 0.001,
 ) -> str:
     """
     Strategy with Market Regime Filter, RSI Entry Timing, and confirmed crossovers.
@@ -116,6 +117,12 @@ def moving_average_signal(
     rsi = _rsi(closes, window=rsi_window)
     _, _, macd_hist = _macd(closes, macd_fast, macd_slow, macd_signal)
     adx = _adx(highs, lows, closes, adx_window)
+    atr = _true_range(highs, lows, closes).ewm(com=adx_window - 1, adjust=False).mean()
+    atr_pct = float(atr.iloc[-1]) / latest_close if latest_close > 0 else 0.0
+
+    if atr_pct < min_atr_pct:
+        logger.info("REGIME: LOW_VOL (ATR%% %.4f < %.4f) | Skipping.", atr_pct, min_atr_pct)
+        return "HOLD"
 
     if adx < adx_threshold:
         logger.info("REGIME: SIDEWAYS (ADX %.1f < %d) | Skipping.", adx, adx_threshold)
@@ -125,8 +132,8 @@ def moving_average_signal(
     regime = "TRENDING" if adx > 25 else "RANGING"
 
     logger.info(
-        "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f",
-        regime, trend, curr_fast, curr_slow, curr_trend, rsi, macd_hist, adx,
+        "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f atr%%=%.3f",
+        regime, trend, curr_fast, curr_slow, curr_trend, rsi, macd_hist, adx, atr_pct * 100,
     )
 
     # Helpers: check that the crossover has been held for confirm_bars bars and
