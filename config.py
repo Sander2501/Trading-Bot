@@ -114,12 +114,6 @@ ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
 #: Warn when open working orders persist for this many consecutive cycles.
 OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
 
-#: Path to JSONL file where per-cycle observability events are appended.
-METRICS_LOG_PATH: str = os.getenv("METRICS_LOG_PATH", "bot_metrics.jsonl")
-
-#: Emit a compact heartbeat log line every N trading cycles.
-METRICS_HEARTBEAT_CYCLES: int = int(os.getenv("METRICS_HEARTBEAT_CYCLES", "10"))
-
 # ── Backtest ──────────────────────────────────────────────────────────────────
 #: Path to the CSV file used by BacktestBroker.
 CSV_PATH: str = os.getenv("BACKTEST_CSV", "historical_data.csv")
@@ -183,10 +177,6 @@ def validate_config() -> None:
     if OPEN_ORDER_STALE_CYCLES <= 0:
         raise ValueError(
             f"OPEN_ORDER_STALE_CYCLES ({OPEN_ORDER_STALE_CYCLES}) must be > 0"
-        )
-    if METRICS_HEARTBEAT_CYCLES <= 0:
-        raise ValueError(
-            f"METRICS_HEARTBEAT_CYCLES ({METRICS_HEARTBEAT_CYCLES}) must be > 0"
         )
     logger.debug("Configuration validated successfully.")
 

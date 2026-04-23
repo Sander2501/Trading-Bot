@@ -34,8 +34,6 @@ from config import (
     MAX_BACKOFF_SECONDS,
     MAX_CONSECUTIVE_ERRORS,
     MAX_DAILY_LOSS_PCT,
-    METRICS_HEARTBEAT_CYCLES,
-    METRICS_LOG_PATH,
     OPEN_ORDER_STALE_CYCLES,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
@@ -86,7 +84,6 @@ class TradingState:
         self.position_low: float = float("inf")
         self.last_snapshot_date: date | None = None
         self.open_order_streak: int = 0
-        self.cycles: int = 0
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
