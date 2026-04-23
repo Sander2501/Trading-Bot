@@ -56,6 +56,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Metrics logging ──────────────────────────────────────────────────────────
+#: File path where JSON-line metrics records are appended.
+METRICS_LOG_PATH: str = "bot_metrics.jsonl"
+
+#: Print a heartbeat summary to the console every N cycles.
+METRICS_HEARTBEAT_CYCLES: int = 10
+
 
 # ------------------------------------------------------------------
 # State container
@@ -84,6 +91,7 @@ class TradingState:
         self.position_low: float = float("inf")
         self.last_snapshot_date: date | None = None
         self.open_order_streak: int = 0
+        self.cycles: int = 0
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
