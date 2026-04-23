@@ -71,7 +71,7 @@ def moving_average_signal(
     fast_window: int = 9,
     slow_window: int = 21,
     trend_window: int = 50,
-    confirm_bars: int = 2,
+    confirm_bars: int = 1,  # Reduced from 2 to decrease lag
     rsi_window: int = 14,
     rsi_overbought: float = 70.0,
     rsi_oversold: float = 30.0,
@@ -82,12 +82,12 @@ def moving_average_signal(
     adx_threshold: float = 20.0,
 ) -> str:
     """
-    Advanced strategy with Market Regime Detection.
+    Upgraded strategy with Market Regime Filter and RSI Entry Timing.
 
     Regimes:
-    1. TRENDING (ADX > 25): Follow EMA crossovers with MACD confirmation.
+    1. TRENDING (ADX > 25): Follow EMA crossovers with MACD confirmation + RSI timing.
     2. RANGING (ADX between 20-25): Use RSI pullbacks within the major trend.
-    3. SIDEWAYS (ADX < 20): Stay flat to avoid chop.
+    3. SIDEWAYS (ADX < 20): Stay flat to avoid chop (User requested filter).
     """
     closes = bars["c"]
     highs  = bars["h"]
@@ -110,48 +110,61 @@ def moving_average_signal(
     _, _, macd_hist = _macd(closes, macd_fast, macd_slow, macd_signal)
     adx = _adx(highs, lows, closes, adx_window)
 
-    # 1. Detect Regime
+    # 1. Market Regime Filter (BIG UPGRADE)
+    # Filter out non-trending markets to avoid chop
     if adx < adx_threshold:
-        logger.info("REGIME: SIDEWAYS (ADX %.1f) | Skipping to avoid chop.", adx)
+        logger.info("REGIME: SIDEWAYS (ADX %.1f < %d) | Skipping.", adx, adx_threshold)
         return "HOLD"
-    
-    regime = "TRENDING" if adx > 25 else "RANGING"
     
     # 2. Detect Primary Trend
     trend = "BULL" if latest_close > curr_trend else "BEAR"
+    regime = "TRENDING" if adx > 25 else "RANGING"
 
     logger.info(
         "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f",
         regime, trend, curr_fast, curr_slow, curr_trend, rsi, macd_hist, adx,
     )
 
-    # 3. Signal Logic
-    if regime == "TRENDING":
-        bull_now = curr_fast > curr_slow > curr_trend
-        bear_now = curr_fast < curr_slow < curr_trend
+    # 3. Signal Logic (Improved Entries + RSI Timing)
+    
+    # BULLISH ENTRIES
+    if trend == "BULL":
+        # Trending: Fast EMA above Slow EMA + MACD positive + RSI DIP
+        # Ranging: Just RSI DIP
+        is_ema_bull = curr_fast > curr_slow
+        is_macd_bull = macd_hist > 0
+        is_rsi_dip = rsi < 45  # Entry timing: Buy the dip in an uptrend
+        
+        if regime == "TRENDING":
+            if is_ema_bull and is_macd_bull and is_rsi_dip:
+                logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Dip)")
+                return "BUY"
+            # Early Entry: EMA Crossover without waiting for confirmation bars
+            if curr_fast > curr_slow and float(fast_ema.iloc[-2]) <= float(slow_ema.iloc[-2]):
+                logger.info("SIGNAL: EARLY CROSSOVER BUY")
+                return "BUY"
+        else: # RANGING
+            if rsi <= rsi_oversold:
+                logger.info("SIGNAL: RSI OVERSOLD BUY (Ranging)")
+                return "BUY"
 
-        if confirm_bars > 1:
-            lookback_f = fast_ema.iloc[-(confirm_bars + 1):-1]
-            lookback_s = slow_ema.iloc[-(confirm_bars + 1):-1]
-            lookback_t = trend_ema.iloc[-(confirm_bars + 1):-1]
-            bull_persistent = bull_now and all(f > s > t for f, s, t in zip(lookback_f, lookback_s, lookback_t))
-            bear_persistent = bear_now and all(f < s < t for f, s, t in zip(lookback_f, lookback_s, lookback_t))
-        else:
-            bull_persistent = bull_now
-            bear_persistent = bear_now
-
-        if bull_persistent and macd_hist > 0:
-            return "BUY"
-        if bear_persistent and macd_hist < 0:
-            return "SELL"
-
-    elif regime == "RANGING":
-        # RSI Pullback logic: Buy the dip in an uptrend, sell the spike in a downtrend
-        if trend == "BULL" and rsi <= rsi_oversold:
-            logger.info("SIGNAL: RSI PULLBACK BUY (RSI %.1f in BULL trend)", rsi)
-            return "BUY"
-        if trend == "BEAR" and rsi >= rsi_overbought:
-            logger.info("SIGNAL: RSI PULLBACK SELL (RSI %.1f in BEAR trend)", rsi)
-            return "SELL"
+    # BEARISH ENTRIES
+    elif trend == "BEAR":
+        is_ema_bear = curr_fast < curr_slow
+        is_macd_bear = macd_hist < 0
+        is_rsi_spike = rsi > 55  # Entry timing: Sell the spike in a downtrend
+        
+        if regime == "TRENDING":
+            if is_ema_bear and is_macd_bear and is_rsi_spike:
+                logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Spike)")
+                return "SELL"
+            # Early Entry: EMA Crossover
+            if curr_fast < curr_slow and float(fast_ema.iloc[-2]) >= float(slow_ema.iloc[-2]):
+                logger.info("SIGNAL: EARLY CROSSOVER SELL")
+                return "SELL"
+        else: # RANGING
+            if rsi >= rsi_overbought:
+                logger.info("SIGNAL: RSI OVERBOUGHT SELL (Ranging)")
+                return "SELL"
 
     return "HOLD"

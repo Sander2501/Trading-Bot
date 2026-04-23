@@ -8,9 +8,12 @@ Designed to be a drop-in replacement for AlpacaBroker so that the exact same
 offline backtesting without any code changes.
 """
 
+import logging
 import pandas as pd
 
 from brokers.base import BaseBroker
+
+logger = logging.getLogger(__name__)
 
 
 class BacktestBroker(BaseBroker):
@@ -129,7 +132,7 @@ class BacktestBroker(BaseBroker):
         self._check_symbol(symbol)
         return False  # simulated orders fill instantly
 
-    def submit_buy(self, symbol: str, qty: float) -> None:
+    def submit_buy(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
         self._check_symbol(symbol)
         if qty <= 0:
             raise ValueError("Buy quantity must be > 0")
@@ -137,12 +140,11 @@ class BacktestBroker(BaseBroker):
         price = self._current_price() * (1 + self._slippage_pct)
         cost = price * qty + self._commission
 
-        # Cash check only applies to opening a new long (not covering a short,
-        # because the short proceeds already sit in cash).
+        # Support simulated leverage/margin (common in CFDs)
         if self._qty >= 0 and cost > self._cash:
-            raise ValueError(
-                f"Not enough cash to buy {qty} units at {price:.2f}. "
-                f"Cash available: {self._cash:.2f}"
+            logger.warning(
+                f"MARGIN: cost ({cost:.2f}) exceeds cash ({self._cash:.2f}). "
+                f"Continuing with simulated leverage."
             )
 
         prev_qty = self._qty
@@ -164,7 +166,7 @@ class BacktestBroker(BaseBroker):
         side = "COVER" if prev_qty < 0 else "BUY"
         self.trades.append(self._fill(side, qty, price))
 
-    def submit_sell(self, symbol: str, qty: float) -> None:
+    def submit_sell(self, symbol: str, qty: float, sl: float | None = None, tp: float | None = None) -> None:
         self._check_symbol(symbol)
         if qty <= 0:
             raise ValueError("Sell quantity must be > 0")

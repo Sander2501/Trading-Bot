@@ -25,19 +25,6 @@ from main import run_once
 
 
 def _compute_metrics(broker: BacktestBroker) -> dict:
-    """
-    Compute standard post-run performance metrics.
-
-    Returns
-    -------
-    dict with keys:
-        roi_pct          – Return on investment vs. starting cash (%).
-        max_drawdown_pct – Largest peak-to-trough decline in equity (%).
-        win_rate_pct     – % of round-trip trades that were profitable.
-        sharpe_ratio     – Annualised Sharpe ratio (rf = 0, 1-min bars).
-        total_trades     – Total number of fills (BUY + SELL combined).
-        final_equity     – Closing account value in USD.
-    """
     starting = broker._starting_equity
     equity_curve = broker.equity_curve or [starting]
     trades = broker.trades
@@ -57,30 +44,37 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
             if dd > max_dd:
                 max_dd = dd
 
-    # Win rate — count profitable round-trips (handles long and short legs)
+    # Win rate & Avg Win/Loss
     long_entry: float | None = None
     short_entry: float | None = None
-    wins = losses = 0
+    wins: list[float] = []
+    losses: list[float] = []
+    
     for t in trades:
         if t["side"] == "BUY":
             long_entry = t["price"]
         elif t["side"] == "SELL" and long_entry is not None:
-            if t["price"] > long_entry:
-                wins += 1
+            pnl = t["price"] - long_entry
+            if pnl > 0:
+                wins.append(pnl)
             else:
-                losses += 1
+                losses.append(pnl)
             long_entry = None
         elif t["side"] == "SHORT":
             short_entry = t["price"]
         elif t["side"] == "COVER" and short_entry is not None:
-            if t["price"] < short_entry:   # profit on short = cover below entry
-                wins += 1
+            pnl = short_entry - t["price"]  # profit on short = entry > cover
+            if pnl > 0:
+                wins.append(pnl)
             else:
-                losses += 1
+                losses.append(pnl)
             short_entry = None
 
-    total_trips = wins + losses
-    win_rate = wins / total_trips * 100 if total_trips > 0 else 0.0
+    total_trips = len(wins) + len(losses)
+    win_rate = len(wins) / total_trips * 100 if total_trips > 0 else 0.0
+    avg_win = sum(wins) / len(wins) if wins else 0.0
+    avg_loss = sum(losses) / len(losses) if losses else 0.0
+    profit_factor = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else float('inf')
 
     # Annualised Sharpe (rf = 0, assumes 1-min bars, 252 trading days)
     sharpe = 0.0
@@ -100,6 +94,9 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         "roi_pct": roi,
         "max_drawdown_pct": max_dd * 100,
         "win_rate_pct": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": profit_factor,
         "sharpe_ratio": sharpe,
         "total_trades": len(trades),
         "final_equity": final_equity,
@@ -121,12 +118,10 @@ def main() -> None:
     )
 
     # Replay every bar through the same run_once logic used in live trading.
-    # broker.done() becomes True once the cursor has passed the last bar.
     while not broker.done():
         run_once(broker, sleep_enabled=False)
         broker.advance()
 
-    # Close any remaining open position at the last available price
     final_qty = broker.get_position_qty(SYMBOL)
     if final_qty > 0:
         broker.submit_sell(SYMBOL, final_qty)
@@ -135,16 +130,24 @@ def main() -> None:
 
     m = _compute_metrics(broker)
 
-    print("\n=== BACKTEST COMPLETE ===")
-    print(f"Starting cash    : ${STARTING_CASH:>12,.2f}")
-    print(f"Final equity     : ${m['final_equity']:>12,.2f}")
-    print(f"ROI              : {m['roi_pct']:>+.2f}%")
-    print(f"Max drawdown     : {m['max_drawdown_pct']:.2f}%")
-    print(f"Win rate         : {m['win_rate_pct']:.1f}%  ({m['total_trades']} total fills)")
-    print(f"Sharpe ratio     : {m['sharpe_ratio']:.3f}")
+    print("\n" + "="*40)
+    print("       BACKTEST PERFORMANCE       ")
+    print("="*40)
+    print(f"Starting Cash    : ${STARTING_CASH:>12,.2f}")
+    print(f"Final Equity     : ${m['final_equity']:>12,.2f}")
+    print(f"Return %         : {m['roi_pct']:>11.2f}%")
+    print(f"Win Rate         : {m['win_rate_pct']:>11.1f}%")
+    print(f"Profit Factor    : {m['profit_factor']:>12.2f}")
+    print(f"Max Drawdown     : {m['max_drawdown_pct']:>11.2f}%")
+    print(f"Sharpe Ratio     : {m['sharpe_ratio']:>12.3f}")
+    print("-"*40)
+    print(f"Avg Win          : ${m['avg_win']:>12.2f}")
+    print(f"Avg Loss         : ${m['avg_loss']:>12.2f}")
+    print(f"Total Fills      : {m['total_trades']:>12}")
+    print("="*40)
 
     if broker.trades:
-        print("\nTrades:")
+        print("\nTRADE LOG:")
         for t in broker.trades:
             print(
                 f"  [{t['t']:>4}] {t['side']:<5}  {t['qty']:.6f}"

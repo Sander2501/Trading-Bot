@@ -209,39 +209,49 @@ def run_once(
             time.sleep(CHECK_INTERVAL_SECONDS)
         return
 
-    # --- Trailing ATR stop-loss ---
-    # Watermarks follow price in the profitable direction so the stop moves
-    # with the trade instead of staying pinned to the entry price.
+    # --- Watermark Tracking ---
     if current_qty > 0:
         state.position_high = max(state.position_high, latest_price)
     elif current_qty < 0:
         state.position_low = min(state.position_low, latest_price)
     else:
-        state.reset_watermarks(latest_price)  # pre-seed for the position about to open
+        state.reset_watermarks(latest_price)
 
+    # --- Position Management (Trailing Stop + Take Profit) ---
     if current_qty != 0:
         entry_price = broker.get_entry_price(SYMBOL)
         if entry_price:
-            atr_stop = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=ATR_STOP_MULT)
-            stop_floor = entry_price * STOP_LOSS_PCT
-            stop_distance = max(atr_stop, stop_floor)
+            atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
+            
+            # 1. Trailing Stop Loss (locks in profits)
+            stop_dist = max(atr * ATR_STOP_MULT, entry_price * STOP_LOSS_PCT)
+            long_stopped  = current_qty > 0 and latest_price <= state.position_high - stop_dist
+            short_stopped = current_qty < 0 and latest_price >= state.position_low  + stop_dist
 
-            # Trail from the watermark, not from entry — locks in profits on big moves
-            long_stopped  = current_qty > 0 and latest_price <= state.position_high - stop_distance
-            short_stopped = current_qty < 0 and latest_price >= state.position_low  + stop_distance
+            # 2. Fixed Take Profit (optional ceiling)
+            tp_dist = max(atr * TAKE_PROFIT_MULT, entry_price * TAKE_PROFIT_PCT)
+            long_tp  = current_qty > 0 and latest_price >= entry_price + tp_dist
+            short_tp = current_qty < 0 and latest_price <= entry_price - tp_dist
 
+            exit_reason = None
             if long_stopped or short_stopped:
+                exit_reason = "TRAILING STOP"
+            elif long_tp or short_tp:
+                exit_reason = "TAKE PROFIT"
+
+            if exit_reason:
                 if current_qty > 0:
                     broker.submit_sell(SYMBOL, current_qty)
-                    direction, ref = "long", state.position_high
+                    ref = state.position_high
                 else:
                     broker.submit_buy(SYMBOL, abs(current_qty))
-                    direction, ref = "short", state.position_low
+                    ref = state.position_low
+                
                 state.reset_watermarks(latest_price)
                 logger.warning(
-                    f"TRAILING STOP ({direction}): closed {abs(current_qty):.6f} {SYMBOL} "
-                    f"at {latest_price:.2f} (peak/trough {ref:.2f}, "
-                    f"stop_dist={stop_distance:.2f})"
+                    f"{exit_reason}: closed {abs(current_qty):.6f} {SYMBOL} "
+                    f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
+                    f"stop_dist={stop_dist:.2f}, tp_dist={tp_dist:.2f})"
                 )
                 if sleep_enabled:
                     time.sleep(CHECK_INTERVAL_SECONDS)
