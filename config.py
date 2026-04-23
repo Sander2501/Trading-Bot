@@ -53,8 +53,25 @@ ADX_WINDOW: int = int(os.getenv("ADX_WINDOW", "14"))
 ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "20.0"))
 
 # ── Risk management ───────────────────────────────────────────────────────────
+# Risk profiles (set RISK_PER_TRADE env var to select):
+#   Conservative : 0.01  (1%  per trade, suitable for beginners)
+#   Moderate     : 0.02  (2%  per trade, reasonable for experienced traders) ← DEFAULT
+#   Aggressive   : 0.05  (5%  per trade, high volatility tolerance required)
+#
+# Position size formula: qty = (equity * RISK_PER_TRADE) / price
+# Example at $100,000 equity, price=$50,000:
+#   Moderate:    qty = (100,000 * 0.02) / 50,000 = 0.04 BTC (~$2,000 exposure)
+#   Aggressive:  qty = (100,000 * 0.05) / 50,000 = 0.10 BTC (~$5,000 exposure)
+#
+# Expected max drawdown ranges (approximate, based on historical volatility):
+#   Conservative  (1%): ~3-5%  max drawdown under normal conditions
+#   Moderate      (2%): ~6-10% max drawdown under normal conditions
+#   Aggressive    (5%): ~15-25% max drawdown — only for experienced traders
+#
+# Hard cap: RISK_PER_TRADE must not exceed 0.10 (10%).  Values above this
+# threshold are rejected at startup to prevent accidental over-leveraging.
 #: Fraction of current equity to allocate per trade.
-RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "1.50"))
+RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
 
 #: ATR-based stop: exit when price falls more than ATR_STOP_MULT × ATR below entry.
 #: A multiplier of 2.0 gives the trade enough room to breathe on BTC 1-min noise
@@ -121,10 +138,10 @@ def validate_config() -> None:
             f"RSI thresholds must satisfy 0 < RSI_OVERSOLD ({RSI_OVERSOLD}) "
             f"< RSI_OVERBOUGHT ({RSI_OVERBOUGHT}) < 100"
         )
-    if not (0 < RISK_PER_TRADE <= 10.0):
+    if not (0 < RISK_PER_TRADE <= 0.10):
         raise ValueError(
-            f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 10.0]; "
-            f"got {RISK_PER_TRADE * 100:.1f}%"
+            f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 0.10] "
+            f"(hard cap at 10%); got {RISK_PER_TRADE * 100:.1f}%"
         )
     if MAX_DAILY_LOSS_PCT <= 0 or MAX_DAILY_LOSS_PCT > 1:
         raise ValueError(

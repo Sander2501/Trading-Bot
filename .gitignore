@@ -19,3 +19,6 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+
+# Generated backtest artifacts
+backtest_report.json
