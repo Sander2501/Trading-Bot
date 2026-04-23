@@ -69,6 +69,15 @@ pytest -q
 python run_backtest.py
 ```
 
+### One-command setup (recommended)
+
+Use the helper script to create `.venv`, install pinned dependencies, and verify
+core imports:
+
+```bash
+./scripts/dev_setup.sh
+```
+
 ---
 
 ## Environment Variables
@@ -243,6 +252,12 @@ python run_backtest.py
 ## Running Tests
 
 ```bash
+# Ensure env + deps first (safe to re-run)
+./scripts/dev_setup.sh
+
+# One-command test runner (auto-creates .venv if missing)
+./scripts/run_tests.sh
+
 # Run all tests (fast)
 pytest -q
 
