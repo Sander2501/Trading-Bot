@@ -123,9 +123,9 @@ class TestValidateConfig:
         with pytest.raises(ValueError, match="BACKTEST_STARTING_CASH"):
             self._patched_validate({"STARTING_CASH": -500.0})
 
-    def test_boundary_risk_per_trade_half_passes(self):
-        """RISK_PER_TRADE of exactly 0.5 should be allowed."""
-        self._patched_validate({"RISK_PER_TRADE": 0.5})
+    def test_boundary_risk_per_trade_max_passes(self):
+        """RISK_PER_TRADE of exactly 0.10 (hard cap) should be allowed."""
+        self._patched_validate({"RISK_PER_TRADE": 0.10})
 
     def test_boundary_max_daily_loss_one_passes(self):
         """MAX_DAILY_LOSS_PCT of exactly 1.0 should be allowed."""

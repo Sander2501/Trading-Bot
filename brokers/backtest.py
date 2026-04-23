@@ -50,6 +50,19 @@ class BacktestBroker(BaseBroker):
         slippage_pct: float = 0.0005,
         commission_per_trade: float = 0.0,
     ) -> None:
+        if starting_cash <= 0:
+            raise ValueError(
+                f"starting_cash must be > 0, got {starting_cash}"
+            )
+        if slippage_pct < 0 or slippage_pct > 0.1:
+            raise ValueError(
+                f"slippage_pct must be in [0, 0.1], got {slippage_pct}"
+            )
+        if commission_per_trade < 0:
+            raise ValueError(
+                f"commission_per_trade must be >= 0, got {commission_per_trade}"
+            )
+
         df = pd.read_csv(csv_path)
 
         if "c" not in df.columns:
@@ -140,11 +153,12 @@ class BacktestBroker(BaseBroker):
         price = self._current_price() * (1 + self._slippage_pct)
         cost = price * qty + self._commission
 
-        # Support simulated leverage/margin (common in CFDs)
+        # Reject orders where the total cost exceeds available cash and there
+        # is no existing short position to close.  (Covering a short is always
+        # permitted because it reduces exposure rather than increasing it.)
         if self._qty >= 0 and cost > self._cash:
-            logger.warning(
-                f"MARGIN: cost ({cost:.2f}) exceeds cash ({self._cash:.2f}). "
-                f"Continuing with simulated leverage."
+            raise ValueError(
+                f"Insufficient cash: cost ({cost:.2f}) exceeds cash ({self._cash:.2f})"
             )
 
         prev_qty = self._qty
