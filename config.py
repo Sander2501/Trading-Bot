@@ -101,6 +101,18 @@ TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
 #: Halt trading for the day once intraday drawdown exceeds this threshold.
 MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.03"))
 
+#: Halt the bot entirely once equity falls this far below its all-time peak.
+#: Protects against slow-motion strategy breakdowns that don't trip the
+#: per-day limit (e.g. 0.5% losses across 30 days).  Requires manual restart.
+MAX_TOTAL_DRAWDOWN_PCT: float = float(os.getenv("MAX_TOTAL_DRAWDOWN_PCT", "0.15"))
+
+#: Consecutive closed-loss trades that trigger a cooldown pause.  Prevents the
+#: bot from revenge-trading through a losing streak.  Set to 0 to disable.
+LOSS_STREAK_HALT: int = int(os.getenv("LOSS_STREAK_HALT", "4"))
+
+#: Number of run_once cycles to skip new entries after LOSS_STREAK_HALT trips.
+LOSS_COOLDOWN_CYCLES: int = int(os.getenv("LOSS_COOLDOWN_CYCLES", "30"))
+
 # ── Backtest Realism ──────────────────────────────────────────────────────────
 #: Fraction of the close price added (buys) or subtracted (sells) to simulate spread.
 SLIPPAGE_PCT: float = float(os.getenv("SLIPPAGE_PCT", "0.0005"))
@@ -171,6 +183,14 @@ def validate_config() -> None:
         raise ValueError(
             f"MAX_DAILY_LOSS_PCT ({MAX_DAILY_LOSS_PCT}) must be in (0, 1]"
         )
+    if not (0 < MAX_TOTAL_DRAWDOWN_PCT <= 1):
+        raise ValueError(
+            f"MAX_TOTAL_DRAWDOWN_PCT ({MAX_TOTAL_DRAWDOWN_PCT}) must be in (0, 1]"
+        )
+    if LOSS_STREAK_HALT < 0:
+        raise ValueError(f"LOSS_STREAK_HALT ({LOSS_STREAK_HALT}) must be >= 0")
+    if LOSS_COOLDOWN_CYCLES < 0:
+        raise ValueError(f"LOSS_COOLDOWN_CYCLES ({LOSS_COOLDOWN_CYCLES}) must be >= 0")
     if STOP_LOSS_PCT < 0:
         raise ValueError(f"STOP_LOSS_PCT ({STOP_LOSS_PCT}) must be >= 0")
     if TAKE_PROFIT_PCT < 0:

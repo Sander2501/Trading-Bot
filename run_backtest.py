@@ -105,8 +105,10 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     profit_factor = (sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else float('inf')
 
-    # Annualised Sharpe (rf = 0, assumes 1-min bars, crypto trades 24/7)
-    sharpe = 0.0
+    # Annualised Sharpe / Sortino / Calmar (rf = 0, crypto trades 24/7)
+    sharpe  = 0.0
+    sortino = 0.0
+    calmar  = 0.0
     if len(equity_curve) > 1:
         bar_returns = [
             (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
@@ -114,10 +116,27 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
             if equity_curve[i - 1] > 0
         ]
         if len(bar_returns) > 1:
+            bars_per_year = 365 * 1440  # calendar days × 1-min bars/day (24/7)
+            annualiser    = bars_per_year ** 0.5
+            mean_r = statistics.mean(bar_returns)
+
             std_r = statistics.stdev(bar_returns)
             if std_r > 0:
-                bars_per_year = 365 * 1440  # calendar days × 1-min bars/day (24/7)
-                sharpe = statistics.mean(bar_returns) / std_r * (bars_per_year**0.5)
+                sharpe = mean_r / std_r * annualiser
+
+            # Sortino uses downside deviation only — penalises negative vol,
+            # not favourable volatility.
+            downside = [r for r in bar_returns if r < 0]
+            if len(downside) > 1:
+                # Root-mean-square of downside returns (not stdev — mean = 0 baseline)
+                dd_rms = (sum(r * r for r in downside) / len(downside)) ** 0.5
+                if dd_rms > 0:
+                    sortino = mean_r / dd_rms * annualiser
+
+            # Calmar = annualised return ÷ max drawdown.
+            if max_dd > 0:
+                annual_return = mean_r * bars_per_year
+                calmar = annual_return / max_dd
 
     return {
         "roi_pct": roi,
@@ -127,6 +146,8 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         "avg_loss": avg_loss,
         "profit_factor": profit_factor,
         "sharpe_ratio": sharpe,
+        "sortino_ratio": sortino,
+        "calmar_ratio": calmar,
         "total_trades": len(trades),
         "final_equity": final_equity,
     }
@@ -174,6 +195,8 @@ def main() -> None:
     print(f"Profit Factor    : {m['profit_factor']:>12.2f}")
     print(f"Max Drawdown     : {m['max_drawdown_pct']:>11.2f}%")
     print(f"Sharpe Ratio     : {m['sharpe_ratio']:>12.3f}")
+    print(f"Sortino Ratio    : {m['sortino_ratio']:>12.3f}")
+    print(f"Calmar Ratio     : {m['calmar_ratio']:>12.3f}")
     print("-"*40)
     print(f"Avg Win          : ${m['avg_win']:>12.2f}")
     print(f"Avg Loss         : ${m['avg_loss']:>12.2f}")

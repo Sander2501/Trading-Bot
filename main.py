@@ -33,12 +33,15 @@ from config import (
     CONFIRM_BARS,
     ERROR_COOLDOWN_SECONDS,
     FAST_WINDOW,
+    LOSS_COOLDOWN_CYCLES,
+    LOSS_STREAK_HALT,
     MACD_FAST,
     MACD_SIGNAL_WINDOW,
     MACD_SLOW,
     MAX_BACKOFF_SECONDS,
     MAX_CONSECUTIVE_ERRORS,
     MAX_DAILY_LOSS_PCT,
+    MAX_TOTAL_DRAWDOWN_PCT,
     OPEN_ORDER_STALE_CYCLES,
     RSI_OVERBOUGHT,
     RSI_OVERSOLD,
@@ -102,6 +105,28 @@ class TradingState:
         self.last_snapshot_date: date | None = None
         self.open_order_streak: int = 0
         self.cycles: int = 0
+        # All-time peak equity — used for global drawdown halt.
+        self.peak_equity: float = 0.0
+        # Running count of consecutive losing trade closures.
+        self.consecutive_losses: int = 0
+        # When non-zero, new entries are blocked until state.cycles reaches this value.
+        self.cooldown_until_cycle: int = 0
+        # Snapshot of last-cycle qty / entry so we can detect broker-side closures
+        # (e.g. attached SL/TP that fills between cycles).
+        self.prev_qty: float = 0.0
+        self.prev_entry_price: float = 0.0
+
+    def record_trade_outcome(self, pnl: float) -> None:
+        """Update the loss-streak counter when a position closes."""
+        if pnl < 0:
+            self.consecutive_losses += 1
+        else:
+            self.consecutive_losses = 0
+
+    def trip_cooldown(self, cycles: int) -> None:
+        """Block new entries for *cycles* future run_once calls."""
+        self.cooldown_until_cycle = self.cycles + cycles
+        self.consecutive_losses = 0
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
@@ -114,6 +139,12 @@ class TradingState:
             "position_high": self.position_high,
             "position_low": self.position_low if self.position_low != float("inf") else None,
             "last_snapshot_date": self.last_snapshot_date.isoformat() if self.last_snapshot_date else None,
+            "peak_equity": self.peak_equity,
+            "consecutive_losses": self.consecutive_losses,
+            "cooldown_until_cycle": self.cooldown_until_cycle,
+            "cycles": self.cycles,
+            "prev_qty": self.prev_qty,
+            "prev_entry_price": self.prev_entry_price,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -132,6 +163,12 @@ class TradingState:
             state.position_low = float(low) if low is not None else float("inf")
             d = data.get("last_snapshot_date")
             state.last_snapshot_date = date.fromisoformat(d) if d else None
+            state.peak_equity = float(data.get("peak_equity") or 0.0)
+            state.consecutive_losses = int(data.get("consecutive_losses") or 0)
+            state.cooldown_until_cycle = int(data.get("cooldown_until_cycle") or 0)
+            state.cycles = int(data.get("cycles") or 0)
+            state.prev_qty = float(data.get("prev_qty") or 0.0)
+            state.prev_entry_price = float(data.get("prev_entry_price") or 0.0)
             logger.info("Restored trading state from %s.", path)
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
@@ -222,6 +259,43 @@ def daily_loss_exceeded(broker: BaseBroker) -> bool:
     if last_equity <= 0:
         return False
     return (last_equity - equity) / last_equity >= MAX_DAILY_LOSS_PCT
+
+
+def total_drawdown_exceeded(broker: BaseBroker, state: TradingState) -> bool:
+    """
+    Return True when equity has fallen more than ``MAX_TOTAL_DRAWDOWN_PCT``
+    below its all-time peak.  Updates ``state.peak_equity`` as a side effect.
+
+    This is a permanent halt — protection against slow-motion strategy
+    breakdowns that don't trip the intraday daily-loss limit.
+    """
+    equity, _ = broker.get_equity()
+    if equity > state.peak_equity:
+        state.peak_equity = equity
+    if state.peak_equity <= 0:
+        return False
+    return (state.peak_equity - equity) / state.peak_equity >= MAX_TOTAL_DRAWDOWN_PCT
+
+
+def in_loss_cooldown(state: TradingState) -> bool:
+    """Return True if the bot is currently inside a post-loss-streak cooldown."""
+    return state.cooldown_until_cycle > state.cycles
+
+
+def _record_close_and_maybe_cooldown(state: TradingState, pnl: float) -> None:
+    """
+    Record a position close and trip a cooldown if the loss streak hits
+    ``LOSS_STREAK_HALT``.  Disabled when ``LOSS_STREAK_HALT == 0``.
+    """
+    state.record_trade_outcome(pnl)
+    if LOSS_STREAK_HALT > 0 and state.consecutive_losses >= LOSS_STREAK_HALT:
+        state.trip_cooldown(LOSS_COOLDOWN_CYCLES)
+        logger.warning(
+            "LOSS STREAK COOLDOWN: %d consecutive losers — blocking new entries "
+            "for %d cycles.",
+            LOSS_STREAK_HALT,
+            LOSS_COOLDOWN_CYCLES,
+        )
 
 
 def _maybe_snapshot_day(broker: BaseBroker, state: TradingState) -> None:
@@ -333,6 +407,20 @@ def run_once(
             time.sleep(3600)
         return
 
+    if total_drawdown_exceeded(broker, state):
+        equity, _ = broker.get_equity()
+        logger.critical(
+            "GLOBAL DRAWDOWN HALT: equity %.2f is %.2f%% below peak %.2f "
+            "(threshold %.1f%%). Manual restart required.",
+            equity,
+            (state.peak_equity - equity) / state.peak_equity * 100,
+            state.peak_equity,
+            MAX_TOTAL_DRAWDOWN_PCT * 100,
+        )
+        if sleep_enabled:
+            time.sleep(3600)
+        return
+
     # Fetch enough bars for all indicators to warm up
     bars_needed = max(TREND_WINDOW, MACD_SLOW, RSI_WINDOW) * 2 + CONFIRM_BARS + 5
     bars = broker.get_recent_bars(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
@@ -362,6 +450,21 @@ def run_once(
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
     equity, _ = broker.get_equity()
+
+    # Detect broker-side closures (e.g. attached SL/TP that filled between
+    # cycles): if we were holding last cycle and are flat now, record the
+    # outcome using prev_entry_price and the current bar's close as exit.
+    if state.prev_qty != 0 and current_qty == 0:
+        exit_price = latest_price
+        if state.prev_qty > 0:
+            pnl = (exit_price - state.prev_entry_price) * state.prev_qty
+        else:
+            pnl = (state.prev_entry_price - exit_price) * abs(state.prev_qty)
+        _record_close_and_maybe_cooldown(state, pnl)
+        logger.info(
+            "Broker-side close detected: prev_qty=%.6f entry=%.2f exit≈%.2f pnl=%+.2f",
+            state.prev_qty, state.prev_entry_price, exit_price, pnl,
+        )
 
     logger.info(
         f"{SYMBOL} | price={latest_price:.2f} | signal={signal} "
@@ -413,15 +516,22 @@ def run_once(
                 if current_qty > 0:
                     broker.submit_sell(SYMBOL, current_qty)
                     ref = state.position_high
+                    pnl = (latest_price - entry_price) * current_qty
                 else:
                     broker.submit_buy(SYMBOL, abs(current_qty))
                     ref = state.position_low
+                    pnl = (entry_price - latest_price) * abs(current_qty)
 
                 state.reset_watermarks(latest_price)
+                _record_close_and_maybe_cooldown(state, pnl)
+                # Clear prev_* so the next cycle's broker-side-close detector
+                # doesn't re-record this close a second time.
+                state.prev_qty = 0.0
+                state.prev_entry_price = 0.0
                 logger.warning(
                     f"{exit_reason}: closed {abs(current_qty):.6f} {SYMBOL} "
                     f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
-                    f"stop_dist={stop_dist:.2f}, tp_dist={tp_dist:.2f})"
+                    f"stop_dist={stop_dist:.2f}, tp_dist={tp_dist:.2f}, pnl={pnl:+.2f})"
                 )
                 _emit_cycle_metrics(
                     state, latest_price, signal, current_qty, f"EXIT_{exit_reason.replace(' ', '_')}",
@@ -435,15 +545,28 @@ def run_once(
     qty = position_size(equity, stop_dist, latest_price)
     action = "HOLD"
 
+    cooling_down = in_loss_cooldown(state)
+
     if signal == "BUY":
         if current_qty > 0:
             logger.info("Already long — holding.")
         elif current_qty < 0:
             # Cover short first; next cycle opens the long if signal persists
+            entry_price = broker.get_entry_price(SYMBOL) or latest_price
+            pnl = (entry_price - latest_price) * abs(current_qty)
             broker.submit_buy(SYMBOL, abs(current_qty))
             state.reset_watermarks(latest_price)
-            logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            _record_close_and_maybe_cooldown(state, pnl)
+            logger.info(
+                f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f} (pnl={pnl:+.2f})"
+            )
             action = "COVER_SHORT"
+        elif cooling_down:
+            logger.info(
+                "BUY signal suppressed — in loss-streak cooldown (%d cycles remaining).",
+                state.cooldown_until_cycle - state.cycles,
+            )
+            action = "SKIP_COOLDOWN"
         else:
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
@@ -464,10 +587,21 @@ def run_once(
             logger.info("Already short — holding.")
         elif current_qty > 0:
             # Close long first; next cycle opens the short if signal persists
+            entry_price = broker.get_entry_price(SYMBOL) or latest_price
+            pnl = (latest_price - entry_price) * current_qty
             broker.submit_sell(SYMBOL, current_qty)
             state.reset_watermarks(latest_price)
-            logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            _record_close_and_maybe_cooldown(state, pnl)
+            logger.info(
+                f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f} (pnl={pnl:+.2f})"
+            )
             action = "CLOSE_LONG"
+        elif cooling_down:
+            logger.info(
+                "SELL signal suppressed — in loss-streak cooldown (%d cycles remaining).",
+                state.cooldown_until_cycle - state.cycles,
+            )
+            action = "SKIP_COOLDOWN"
         else:
             if not ALLOW_SHORTS:
                 logger.info("SELL signal — ALLOW_SHORTS=False, staying flat.")
@@ -496,6 +630,15 @@ def run_once(
     _emit_cycle_metrics(
         state, latest_price, signal, current_qty, action, open_order_exists, equity
     )
+
+    # Record current position snapshot so the next cycle can detect
+    # broker-side closures (attached SL/TP fills between cycles).
+    new_qty = broker.get_position_qty(SYMBOL)
+    state.prev_qty = new_qty
+    if new_qty != 0:
+        state.prev_entry_price = broker.get_entry_price(SYMBOL) or latest_price
+    else:
+        state.prev_entry_price = 0.0
 
     if sleep_enabled:
         time.sleep(CHECK_INTERVAL_SECONDS)

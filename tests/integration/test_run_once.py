@@ -210,6 +210,131 @@ def test_trading_state_load_missing_file(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Global drawdown halt
+# ---------------------------------------------------------------------------
+
+
+def test_global_drawdown_halt_triggers(tmp_path, monkeypatch):
+    """A 20% equity drop from peak must halt new entries regardless of daily baseline."""
+    import main
+
+    broker = _make_broker(tmp_path, [100.0 + i * 0.5 for i in range(200)])
+    state = TradingState()
+
+    # Cycle 1 establishes peak_equity = $100k.
+    run_once(broker, state=state, sleep_enabled=False)
+    broker.advance()
+    assert state.peak_equity > 0
+
+    # Simulate a large drawdown: equity reports as 80% of peak.
+    monkeypatch.setattr(broker, "get_equity", lambda: (80_000.0, 80_000.0))
+
+    prev_trades = len(broker.trades)
+    for _ in range(10):
+        run_once(broker, state=state, sleep_enabled=False)
+        broker.advance()
+
+    assert len(broker.trades) == prev_trades, (
+        "Global drawdown halt must block new fills once equity is 20% below peak."
+    )
+
+
+def test_peak_equity_tracks_highs(tmp_path, monkeypatch):
+    """peak_equity must monotonically increase as equity rises."""
+    broker = _make_broker(tmp_path, [100.0 + i * 0.5 for i in range(200)])
+    state = TradingState()
+
+    for eq in (100_000, 105_000, 103_000, 110_000, 108_000):
+        monkeypatch.setattr(broker, "get_equity", lambda eq=eq: (float(eq), float(eq)))
+        run_once(broker, state=state, sleep_enabled=False)
+        broker.advance()
+
+    assert state.peak_equity == pytest.approx(110_000.0)
+
+
+# ---------------------------------------------------------------------------
+# Loss-streak cooldown
+# ---------------------------------------------------------------------------
+
+
+def test_loss_streak_cooldown_blocks_new_entries(tmp_path, monkeypatch):
+    """After LOSS_STREAK_HALT losers, new BUY/SELL signals must be skipped."""
+    import main
+
+    broker = _make_broker(tmp_path, [100.0 + i * 0.5 for i in range(200)])
+    monkeypatch.setattr(main, "LOSS_STREAK_HALT", 3)
+    monkeypatch.setattr(main, "LOSS_COOLDOWN_CYCLES", 5)
+
+    state = TradingState()
+    # Force a BUY signal so every cycle tries to open.
+    monkeypatch.setattr(main, "moving_average_signal", lambda *a, **k: "BUY")
+
+    # Advance past warm-up, then simulate 3 losses directly via the helper.
+    run_once(broker, state=state, sleep_enabled=False)
+    broker.advance()
+    for _ in range(3):
+        state.record_trade_outcome(-100.0)
+    # Manually trigger cooldown as if a _record_close_and_maybe_cooldown had fired.
+    main._record_close_and_maybe_cooldown(state, -100.0)  # 4th loss — but halt=3 so already tripped once
+
+    # Cooldown is now active.  Run several cycles; no new BUY entries should open.
+    # (Broker-side SL/TP fills on the pre-existing position are still OK — those
+    #  are forced exits, not new entries governed by the cooldown.)
+    prev_trade_count = len(broker.trades)
+    for _ in range(3):
+        run_once(broker, state=state, sleep_enabled=False)
+        broker.advance()
+
+    new_entry_fills = [
+        t for t in broker.trades[prev_trade_count:] if t["side"] in ("BUY", "SHORT")
+    ]
+    assert len(new_entry_fills) == 0, (
+        f"Expected 0 new BUY/SHORT fills during cooldown, got {len(new_entry_fills)}."
+    )
+
+
+def test_winning_trade_resets_loss_streak():
+    """A winning outcome must reset consecutive_losses to 0."""
+    state = TradingState()
+    state.record_trade_outcome(-50.0)
+    state.record_trade_outcome(-75.0)
+    assert state.consecutive_losses == 2
+    state.record_trade_outcome(+100.0)
+    assert state.consecutive_losses == 0
+
+
+# ---------------------------------------------------------------------------
+# Broker-side close detection (attached SL/TP fills between cycles)
+# ---------------------------------------------------------------------------
+
+
+def test_broker_side_close_recorded_as_loss(tmp_path, monkeypatch):
+    """When broker closes between cycles (qty flips to 0), PnL must be recorded."""
+    # Downtrend — bars at cursor 60+ are well below 100.
+    closes = [200.0 - i * 0.5 for i in range(200)]
+    broker = _make_broker(tmp_path, closes)
+    state = TradingState()
+
+    # Warm up indicators before triggering the close-detection logic.
+    for _ in range(60):
+        broker.advance()
+
+    # Pretend the previous cycle ended with a long at $200 (well above current).
+    state.prev_qty = 1.0
+    state.prev_entry_price = 200.0
+
+    # This cycle the broker reports flat (SL fired between cycles).
+    monkeypatch.setattr(broker, "get_position_qty", lambda s: 0.0)
+    monkeypatch.setattr(broker, "get_entry_price", lambda s: None)
+
+    run_once(broker, state=state, sleep_enabled=False)
+
+    assert state.consecutive_losses == 1, (
+        "Broker-side close at lower price than entry should register as a loss."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Dry-run broker
 # ---------------------------------------------------------------------------
 
