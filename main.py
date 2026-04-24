@@ -39,6 +39,7 @@ from config import (
     MAX_BACKOFF_SECONDS,
     MIN_ATR_PCT,
     MAX_CONSECUTIVE_ERRORS,
+    MAX_GROSS_EXPOSURE_PCT,
     MAX_DAILY_LOSS_PCT,
     MAX_ORDER_ERRORS,
     OPEN_ORDER_STALE_CYCLES,
@@ -200,7 +201,12 @@ class DryRunBroker(BaseBroker):
 # ------------------------------------------------------------------
 
 
-def position_size(equity: float, stop_distance: float, price: float) -> float:
+def position_size(
+    equity: float,
+    buying_power: float,
+    stop_distance: float,
+    price: float,
+) -> float:
     """
     Calculate order quantity using true risk-based sizing, capped by affordability.
 
@@ -213,11 +219,12 @@ def position_size(equity: float, stop_distance: float, price: float) -> float:
     """
     if stop_distance <= 0 or price <= 0:
         return 0.0
-    qty_by_risk  = (equity * RISK_PER_TRADE) / stop_distance
+    qty_by_risk = (equity * RISK_PER_TRADE) / stop_distance
+    effective_buying_power = max(0.0, min(equity, buying_power))
     qty_by_exposure = equity * MAX_GROSS_EXPOSURE_PCT / (price * (1 + SLIPPAGE_PCT))
     # Cap at 99.9% of equity divided by worst-case fill price to ensure the
     # order cost stays within available cash after slippage and float rounding.
-    qty_by_funds = equity * 0.999 / (price * (1 + SLIPPAGE_PCT))
+    qty_by_funds = effective_buying_power * 0.999 / (price * (1 + SLIPPAGE_PCT))
     return round(max(0.0, min(qty_by_risk, qty_by_funds, qty_by_exposure)), 6)
 
 
@@ -368,6 +375,8 @@ def run_once(
     bars = broker.get_recent_bars(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
 
     latest_price = float(bars["c"].iloc[-1])
+    latest_high = float(bars["h"].iloc[-1])
+    latest_low = float(bars["l"].iloc[-1])
 
     # Compute ATR once — used for both the trailing stop check and position sizing.
     atr = atr_stop_distance(bars["h"], bars["l"], bars["c"], window=ATR_STOP_WINDOW, multiplier=1.0)
@@ -392,6 +401,7 @@ def run_once(
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
+    buying_power = broker.get_buying_power()
     equity, _ = broker.get_equity()
 
     logger.info(
@@ -428,11 +438,17 @@ def run_once(
     if current_qty != 0:
         entry_price = broker.get_entry_price(SYMBOL)
         if entry_price:
-            long_stopped  = current_qty > 0 and latest_price <= state.position_high - stop_dist
-            short_stopped = current_qty < 0 and latest_price >= state.position_low  + stop_dist
+            # Use intrabar extremes (h/l) for trigger checks so exits are
+            # consistent with how backtests evaluate standing stops/targets.
+            long_stop_level = state.position_high - stop_dist
+            short_stop_level = state.position_low + stop_dist
+            long_tp_level = entry_price + tp_dist
+            short_tp_level = entry_price - tp_dist
 
-            long_tp  = current_qty > 0 and latest_price >= entry_price + tp_dist
-            short_tp = current_qty < 0 and latest_price <= entry_price - tp_dist
+            long_stopped = current_qty > 0 and latest_low <= long_stop_level
+            short_stopped = current_qty < 0 and latest_high >= short_stop_level
+            long_tp = current_qty > 0 and latest_high >= long_tp_level
+            short_tp = current_qty < 0 and latest_low <= short_tp_level
 
             exit_reason = None
             if long_stopped or short_stopped:
@@ -479,7 +495,7 @@ def run_once(
                 return
 
     # --- Signal execution ---
-    qty = position_size(equity, stop_dist, latest_price)
+    qty = position_size(equity, buying_power, stop_dist, latest_price)
     action = "HOLD"
 
     if signal == "BUY":
