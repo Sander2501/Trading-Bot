@@ -125,7 +125,7 @@ def moving_average_signal(
         return "HOLD"
 
     if adx < adx_threshold:
-        logger.info("REGIME: SIDEWAYS (ADX %.1f < %d) | Skipping.", adx, adx_threshold)
+        logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold)
         return "HOLD"
 
     trend  = "BULL" if latest_close > curr_trend else "BEAR"
