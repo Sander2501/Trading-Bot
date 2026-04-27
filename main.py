@@ -36,6 +36,8 @@ from config import (
     CHECK_INTERVAL_SECONDS,
     COMMISSION_PER_TRADE,
     CONFIRM_BARS,
+    DATA_INTEGRITY_GATE_ENABLED,
+    DATA_MAX_BAR_AGE_SECONDS,
     ERROR_COOLDOWN_SECONDS,
     FAST_WINDOW,
     MACD_FAST,
@@ -75,6 +77,7 @@ from config import (
     TREND_WINDOW,
     VOLUME_FILTER_ENABLED,
 )
+from data_integrity import check_bars, interval_seconds_for
 from strategy import atr_stop_distance, moving_average_signal
 
 logging.basicConfig(
@@ -402,6 +405,27 @@ def run_once(
     # Fetch enough bars for all indicators to warm up
     bars_needed = max(TREND_WINDOW, MACD_SLOW, RSI_WINDOW) * 2 + CONFIRM_BARS + 5
     bars = broker.get_recent_bars(SYMBOL, limit=bars_needed, timeframe=TIMEFRAME)
+
+    expected_interval = interval_seconds_for(TIMEFRAME)
+    # Default freshness budget: 4 bars worth, only when broker provides timestamps
+    # and live trading (sleep_enabled=True). Backtests must not be freshness-gated.
+    max_age = (
+        DATA_MAX_BAR_AGE_SECONDS or (expected_interval * 4 if expected_interval else None)
+    ) if sleep_enabled else None
+    integrity = check_bars(
+        bars,
+        expected_interval_seconds=expected_interval,
+        max_age_seconds=max_age,
+    )
+    if integrity.issues:
+        for msg in integrity.issues:
+            level = logger.error if msg in integrity.fatal else logger.warning
+            level("Data integrity: %s", msg)
+        if integrity.fatal and DATA_INTEGRITY_GATE_ENABLED:
+            logger.error("Data integrity gate tripped — skipping cycle.")
+            if sleep_enabled:
+                time.sleep(CHECK_INTERVAL_SECONDS)
+            return
 
     latest_price = float(bars["c"].iloc[-1])
     latest_high = float(bars["h"].iloc[-1])

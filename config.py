@@ -162,6 +162,16 @@ ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
 #: Warn when open working orders persist for this many consecutive cycles.
 OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
 
+# ── Data integrity ────────────────────────────────────────────────────────────
+#: Refuse to act on a cycle whose bar batch has fatal integrity issues
+#: (NaNs, broken OHLC invariants, duplicate timestamps, stale feed).
+#: When False, problems are logged but do not block trading.
+DATA_INTEGRITY_GATE_ENABLED: bool = os.getenv("DATA_INTEGRITY_GATE_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+#: Maximum allowed age of the latest bar relative to wall clock (seconds).
+#: 0 disables the freshness check (default: 4× the configured timeframe).
+DATA_MAX_BAR_AGE_SECONDS: int = int(os.getenv("DATA_MAX_BAR_AGE_SECONDS", "0"))
+
 # ── Filters ───────────────────────────────────────────────────────────────────
 #: Enable session-hour-based filter (suppress signals outside trading hours).
 SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}

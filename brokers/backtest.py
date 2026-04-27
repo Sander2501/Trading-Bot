@@ -152,11 +152,14 @@ class BacktestBroker(BaseBroker):
         self._check_symbol(symbol)
         end = self._cursor + 1
         start = max(0, end - limit)
-        return pd.DataFrame({
+        cols = {
             "h": self._highs.iloc[start:end].values,
             "l": self._lows.iloc[start:end].values,
             "c": self._closes.iloc[start:end].values,
-        })
+        }
+        if self._timestamps is not None:
+            cols["t"] = self._timestamps.iloc[start:end].values
+        return pd.DataFrame(cols)
 
     # ------------------------------------------------------------------
     # Position queries
