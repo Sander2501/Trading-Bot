@@ -137,6 +137,8 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
 
     sharpe = 0.0
     bar_returns: list[float] = []
+    bars_per_year = _bars_per_year(TIMEFRAME)
+    annualization = bars_per_year**0.5
     if len(equity_curve) > 1:
         bar_returns = [
             (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
@@ -146,8 +148,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         if len(bar_returns) > 1:
             std_r = statistics.stdev(bar_returns)
             if std_r > 0:
-                bars_per_year = _bars_per_year(TIMEFRAME)
-                sharpe = statistics.mean(bar_returns) / std_r * (bars_per_year**0.5)
+                sharpe = statistics.mean(bar_returns) / std_r * annualization
 
     def _bootstrap_ci(values: list[float], stat_fn, n_boot: int = 500, alpha: float = 0.05) -> tuple[float | None, float | None]:
         if not values:
@@ -175,12 +176,14 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         return sum(pos) / abs(sum(neg))
 
     def _sh(samples: list[float]) -> float | None:
+        # Annualized to match the headline Sharpe; bootstrap CI must be in the
+        # same units as the point estimate or comparison is meaningless.
         if len(samples) < 2:
             return None
         std = statistics.stdev(samples)
         if std <= 0:
             return None
-        return statistics.mean(samples) / std
+        return statistics.mean(samples) / std * annualization
 
     pf_ci_low, pf_ci_high = _bootstrap_ci(trade_pnls, _pf)
     sh_ci_low, sh_ci_high = _bootstrap_ci(bar_returns, _sh)
