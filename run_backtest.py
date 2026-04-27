@@ -14,6 +14,7 @@ performance report.
 
 import statistics
 from collections import deque
+from random import Random
 
 from brokers import BacktestBroker
 from config import (

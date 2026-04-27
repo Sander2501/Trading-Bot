@@ -416,6 +416,15 @@ def run_once(
         adaptive_lookback_bars=adaptive_lookback_bars,
         adx_threshold_percentile=ADAPTIVE_ADX_PERCENTILE,
         min_atr_pct_percentile=ADAPTIVE_ATR_PERCENTILE,
+        session_filter_enabled=SESSION_FILTER_ENABLED,
+        session_start_hour_utc=SESSION_START_HOUR_UTC,
+        session_end_hour_utc=SESSION_END_HOUR_UTC,
+        volume_filter_enabled=VOLUME_FILTER_ENABLED,
+        min_volume=0.0,
+        structure_filter_enabled=STRUCTURE_FILTER_ENABLED,
+        structure_lookback=STRUCTURE_LOOKBACK,
+        atr_accel_window=0,
+        min_atr_accel=0.0,
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
