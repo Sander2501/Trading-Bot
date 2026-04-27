@@ -9,13 +9,11 @@ Run with::
 
 Replays ``historical_data.csv`` (or the file set by ``BACKTEST_CSV``) through
 the same ``run_once`` loop used in live trading, then prints a full
-performance report and saves ``backtest_report.json``.
+performance report.
 """
 
-import json
 import statistics
 from collections import deque
-from datetime import datetime, timezone
 
 from brokers import BacktestBroker
 from config import (
@@ -218,33 +216,6 @@ def main() -> None:
     print(f"Avg Loss         : ${m['avg_loss']:>12.2f}")
     print(f"Total Fills      : {m['total_trades']:>12}")
     print("="*40)
-
-    if broker.trades:
-        print("\nTRADE LOG:")
-        for t in broker.trades:
-            print(
-                f"  [{t['t']:>4}] {t['side']:<5}  {t['qty']:.6f}"
-                f" @ {t['price']:>10,.2f}  equity={t['equity']:>12,.2f}"
-            )
-
-    # ------------------------------------------------------------------
-    # Save machine-readable report
-    # ------------------------------------------------------------------
-    # Replace non-finite floats (inf, nan) so the JSON is always valid.
-    def _safe(v):
-        if isinstance(v, float) and not (v == v) or (isinstance(v, float) and abs(v) == float("inf")):
-            return None
-        return v
-
-    report = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "starting_cash": STARTING_CASH,
-        **{k: _safe(v) for k, v in m.items()},
-    }
-    with open("backtest_report.json", "w") as fh:
-        json.dump(report, fh, indent=2)
-    print("\nReport saved to backtest_report.json")
-
 
 if __name__ == "__main__":
     main()

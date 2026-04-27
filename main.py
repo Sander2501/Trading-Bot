@@ -19,7 +19,6 @@ import json
 import logging
 import time
 from datetime import date, datetime, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from brokers import CapitalBroker, BaseBroker
@@ -64,20 +63,9 @@ from strategy import atr_stop_distance, moving_average_signal
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        RotatingFileHandler("bot.log", maxBytes=10 * 1024 * 1024, backupCount=5),
-        logging.StreamHandler(),
-    ],
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
-
-# ── Metrics logging ──────────────────────────────────────────────────────────
-#: File path where JSON-line metrics records are appended.
-METRICS_LOG_PATH: str = "bot_metrics.jsonl"
-
-#: Print a heartbeat summary to the console every N cycles.
-METRICS_HEARTBEAT_CYCLES: int = 10
-
 
 # ------------------------------------------------------------------
 # State container
@@ -286,36 +274,8 @@ def _emit_cycle_metrics(
     open_order_exists: bool,
     equity: float,
 ) -> None:
-    """Append a structured per-cycle JSONL record for observability."""
-    payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "cycle": state.cycles,
-        "symbol": SYMBOL,
-        "timeframe": TIMEFRAME,
-        "price": round(latest_price, 8),
-        "signal": signal,
-        "action": action,
-        "position_qty": round(current_qty, 8),
-        "equity": round(equity, 8),
-        "open_order": bool(open_order_exists),
-        "open_order_streak": state.open_order_streak,
-    }
-    try:
-        with open(METRICS_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        logger.warning("Failed to write metrics record to %s: %s", METRICS_LOG_PATH, exc)
-
-    if state.cycles % METRICS_HEARTBEAT_CYCLES == 0:
-        logger.info(
-            "HEARTBEAT cycle=%d signal=%s action=%s qty=%.6f equity=%.2f open_order=%s",
-            state.cycles,
-            signal,
-            action,
-            current_qty,
-            equity,
-            open_order_exists,
-        )
+    """Metrics emission disabled: keeps call-sites stable without file writes."""
+    return None
 
 
 # ------------------------------------------------------------------
