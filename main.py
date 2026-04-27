@@ -19,7 +19,6 @@ import json
 import logging
 import time
 from datetime import date, datetime, timezone
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from brokers import CapitalBroker, BaseBroker
@@ -29,6 +28,11 @@ from config import (
     ALLOW_SHORTS,
     ATR_STOP_MULT,
     ATR_STOP_WINDOW,
+    ADAPTIVE_ADX_PERCENTILE,
+    ADAPTIVE_ATR_PERCENTILE,
+    ADAPTIVE_LOOKBACK_DAYS,
+    ADAPTIVE_THRESHOLDS_ENABLED,
+    BREAK_EVEN_R_MULT,
     CHECK_INTERVAL_SECONDS,
     CONFIRM_BARS,
     ERROR_COOLDOWN_SECONDS,
@@ -43,6 +47,8 @@ from config import (
     MAX_DAILY_LOSS_PCT,
     MAX_GROSS_EXPOSURE_PCT,
     MAX_ORDER_ERRORS,
+    MIN_EXPECTED_RR,
+    ESTIMATED_ROUND_TRIP_COST_PCT,
     OPEN_ORDER_STALE_CYCLES,
     ORDER_ERROR_COOLDOWN_SECONDS,
     RSI_OVERBOUGHT,
@@ -54,6 +60,10 @@ from config import (
     STATE_FILE,
     STOP_LOSS_PCT,
     TAKE_PROFIT_MULT,
+    PARTIAL_TP1_FRACTION,
+    PARTIAL_TP1_R,
+    PARTIAL_TP2_FRACTION,
+    PARTIAL_TP2_R,
     TAKE_PROFIT_PCT,
     SYMBOL,
     TIMEFRAME,
@@ -64,20 +74,9 @@ from strategy import atr_stop_distance, moving_average_signal
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        RotatingFileHandler("bot.log", maxBytes=10 * 1024 * 1024, backupCount=5),
-        logging.StreamHandler(),
-    ],
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
-
-# ── Metrics logging ──────────────────────────────────────────────────────────
-#: File path where JSON-line metrics records are appended.
-METRICS_LOG_PATH: str = "bot_metrics.jsonl"
-
-#: Print a heartbeat summary to the console every N cycles.
-METRICS_HEARTBEAT_CYCLES: int = 10
-
 
 # ------------------------------------------------------------------
 # State container
@@ -104,6 +103,11 @@ class TradingState:
     def __init__(self) -> None:
         self.position_high: float = 0.0
         self.position_low: float = float("inf")
+        self.entry_price: float = 0.0
+        self.initial_stop_dist: float = 0.0
+        self.break_even_armed: bool = False
+        self.partial_tp1_taken: bool = False
+        self.partial_tp2_taken: bool = False
         self.last_snapshot_date: date | None = None
         self.open_order_streak: int = 0
         self.cycles: int = 0
@@ -114,11 +118,24 @@ class TradingState:
         self.position_high = price
         self.position_low = price
 
+    def seed_trade_context(self, entry_price: float, stop_distance: float) -> None:
+        """Record entry metadata for break-even and partial-TP logic."""
+        self.entry_price = entry_price
+        self.initial_stop_dist = max(0.0, stop_distance)
+        self.break_even_armed = False
+        self.partial_tp1_taken = False
+        self.partial_tp2_taken = False
+
     def save(self, path: str = STATE_FILE) -> None:
         """Persist state to *path* so the bot can recover after a crash."""
         data = {
             "position_high": self.position_high,
             "position_low": self.position_low if self.position_low != float("inf") else None,
+            "entry_price": self.entry_price,
+            "initial_stop_dist": self.initial_stop_dist,
+            "break_even_armed": self.break_even_armed,
+            "partial_tp1_taken": self.partial_tp1_taken,
+            "partial_tp2_taken": self.partial_tp2_taken,
             "last_snapshot_date": self.last_snapshot_date.isoformat() if self.last_snapshot_date else None,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -136,6 +153,11 @@ class TradingState:
             state.position_high = float(data.get("position_high") or 0.0)
             low = data.get("position_low")
             state.position_low = float(low) if low is not None else float("inf")
+            state.entry_price = float(data.get("entry_price") or 0.0)
+            state.initial_stop_dist = float(data.get("initial_stop_dist") or 0.0)
+            state.break_even_armed = bool(data.get("break_even_armed", False))
+            state.partial_tp1_taken = bool(data.get("partial_tp1_taken", False))
+            state.partial_tp2_taken = bool(data.get("partial_tp2_taken", False))
             d = data.get("last_snapshot_date")
             state.last_snapshot_date = date.fromisoformat(d) if d else None
             logger.info("Restored trading state from %s.", path)
@@ -286,36 +308,8 @@ def _emit_cycle_metrics(
     open_order_exists: bool,
     equity: float,
 ) -> None:
-    """Append a structured per-cycle JSONL record for observability."""
-    payload = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "cycle": state.cycles,
-        "symbol": SYMBOL,
-        "timeframe": TIMEFRAME,
-        "price": round(latest_price, 8),
-        "signal": signal,
-        "action": action,
-        "position_qty": round(current_qty, 8),
-        "equity": round(equity, 8),
-        "open_order": bool(open_order_exists),
-        "open_order_streak": state.open_order_streak,
-    }
-    try:
-        with open(METRICS_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, separators=(",", ":")) + "\n")
-    except OSError as exc:
-        logger.warning("Failed to write metrics record to %s: %s", METRICS_LOG_PATH, exc)
-
-    if state.cycles % METRICS_HEARTBEAT_CYCLES == 0:
-        logger.info(
-            "HEARTBEAT cycle=%d signal=%s action=%s qty=%.6f equity=%.2f open_order=%s",
-            state.cycles,
-            signal,
-            action,
-            current_qty,
-            equity,
-            open_order_exists,
-        )
+    """Metrics emission disabled: keeps call-sites stable without file writes."""
+    return None
 
 
 # ------------------------------------------------------------------
@@ -386,6 +380,17 @@ def run_once(
     stop_dist = max(atr * ATR_STOP_MULT, latest_price * STOP_LOSS_PCT)
     tp_dist   = max(atr * TAKE_PROFIT_MULT, latest_price * TAKE_PROFIT_PCT)
 
+    bars_per_day = {
+        "1Min": 24 * 60,
+        "5Min": 24 * 12,
+        "15Min": 24 * 4,
+        "30Min": 24 * 2,
+        "1H": 24,
+        "4H": 6,
+        "1D": 1,
+    }.get(TIMEFRAME, 24 * 4)
+    adaptive_lookback_bars = ADAPTIVE_LOOKBACK_DAYS * bars_per_day if ADAPTIVE_THRESHOLDS_ENABLED else 0
+
     signal = moving_average_signal(
         bars,
         fast_window=FAST_WINDOW,
@@ -401,6 +406,9 @@ def run_once(
         adx_window=ADX_WINDOW,
         adx_threshold=ADX_THRESHOLD,
         min_atr_pct=MIN_ATR_PCT,
+        adaptive_lookback_bars=adaptive_lookback_bars,
+        adx_threshold_percentile=ADAPTIVE_ADX_PERCENTILE,
+        min_atr_pct_percentile=ADAPTIVE_ATR_PERCENTILE,
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
@@ -436,15 +444,87 @@ def run_once(
         state.position_low = min(state.position_low, latest_price)
     else:
         state.reset_watermarks(latest_price)
+        state.seed_trade_context(0.0, 0.0)
 
     # --- Position Management (Trailing Stop + Take Profit) ---
     if current_qty != 0:
         entry_price = broker.get_entry_price(SYMBOL)
         if entry_price:
+            if state.initial_stop_dist <= 0:
+                state.seed_trade_context(float(entry_price), stop_dist)
+
+            init_stop = max(state.initial_stop_dist, 1e-9)
+            if current_qty > 0:
+                r_multiple = (latest_high - state.entry_price) / init_stop
+            else:
+                r_multiple = (state.entry_price - latest_low) / init_stop
+
+            if not state.break_even_armed and r_multiple >= BREAK_EVEN_R_MULT:
+                state.break_even_armed = True
+                logger.info("BREAK-EVEN armed at %.2fR", r_multiple)
+
+            if current_qty > 0:
+                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
+                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
+                if p1_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp1 long",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp1_taken = True
+                            logger.info("PARTIAL TP1 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+                if p2_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp2 long",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp2_taken = True
+                            logger.info("PARTIAL TP2 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+            else:
+                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
+                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
+                if p1_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp1 short",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp1_taken = True
+                            logger.info("PARTIAL TP1 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+                if p2_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp2 short",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp2_taken = True
+                            logger.info("PARTIAL TP2 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+
             # Use intrabar extremes (h/l) for trigger checks so exits are
             # consistent with how backtests evaluate standing stops/targets.
             long_stop_level = state.position_high - stop_dist
             short_stop_level = state.position_low + stop_dist
+            if state.break_even_armed:
+                long_stop_level = max(long_stop_level, state.entry_price)
+                short_stop_level = min(short_stop_level, state.entry_price)
             long_tp_level = entry_price + tp_dist
             short_tp_level = entry_price - tp_dist
 
@@ -484,6 +564,7 @@ def run_once(
                     return
 
                 state.reset_watermarks(latest_price)
+                state.seed_trade_context(0.0, 0.0)
                 logger.warning(
                     f"{exit_reason}: closed {abs(current_qty):.6f} {SYMBOL} "
                     f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
@@ -500,6 +581,9 @@ def run_once(
     # --- Signal execution ---
     qty = position_size(equity, buying_power, stop_dist, latest_price)
     action = "HOLD"
+    est_cost = latest_price * ESTIMATED_ROUND_TRIP_COST_PCT
+    rr_after_cost = (tp_dist - est_cost) / max(1e-9, stop_dist + est_cost)
+    allow_new_entry = rr_after_cost >= MIN_EXPECTED_RR
 
     if signal == "BUY":
         if current_qty > 0:
@@ -523,6 +607,13 @@ def run_once(
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
                 action = "SKIP_NO_BUYING_POWER"
+            elif not allow_new_entry:
+                logger.info(
+                    "Skipping long: expected RR after costs %.2f < min %.2f",
+                    rr_after_cost,
+                    MIN_EXPECTED_RR,
+                )
+                action = "SKIP_LOW_RR"
             else:
                 sl_price = round(latest_price - stop_dist, 8)
                 tp_price = round(latest_price + tp_dist, 8)
@@ -537,6 +628,7 @@ def run_once(
                     )
                     return
                 state.position_high = latest_price
+                state.seed_trade_context(latest_price, stop_dist)
                 logger.info(
                     f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
@@ -571,6 +663,13 @@ def run_once(
             elif qty <= 0:
                 logger.info("Insufficient equity to open short.")
                 action = "SKIP_NO_EQUITY"
+            elif not allow_new_entry:
+                logger.info(
+                    "Skipping short: expected RR after costs %.2f < min %.2f",
+                    rr_after_cost,
+                    MIN_EXPECTED_RR,
+                )
+                action = "SKIP_LOW_RR"
             else:
                 sl_price = round(latest_price + stop_dist, 8)
                 tp_price = round(latest_price - tp_dist, 8)
@@ -585,6 +684,7 @@ def run_once(
                     )
                     return
                 state.position_low = latest_price
+                state.seed_trade_context(latest_price, stop_dist)
                 logger.info(
                     f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
