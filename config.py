@@ -24,9 +24,6 @@ SYMBOL: str = os.getenv("SYMBOL", "BTC/USD")
 TIMEFRAME: str = os.getenv("TIMEFRAME", "15Min")
 
 # ── Strategy: triple EMA + MACD + ADX + RSI ──────────────────────────────────
-#: Legacy single-MA window (unused by current strategy; kept for compat).
-WINDOW: int = int(os.getenv("WINDOW", "20"))
-
 #: Bars the EMA crossover must persist before a signal fires.
 #: 2 reduces whipsaws on noisy 1-minute BTC data vs the old default of 1.
 CONFIRM_BARS: int = int(os.getenv("CONFIRM_BARS", "2"))
