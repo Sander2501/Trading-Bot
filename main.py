@@ -44,7 +44,6 @@ from config import (
     MAX_BACKOFF_SECONDS,
     MIN_ATR_PCT,
     MAX_CONSECUTIVE_ERRORS,
-    MAX_GROSS_EXPOSURE_PCT,
     MAX_DAILY_LOSS_PCT,
     MAX_GROSS_EXPOSURE_PCT,
     MAX_ORDER_ERRORS,
@@ -306,17 +305,43 @@ def _maybe_snapshot_day(broker: BaseBroker, state: TradingState) -> None:
         logger.info("Daily equity snapshot taken (baseline date: %s).", today)
 
 
-def _emit_cycle_metrics(
+def _maybe_take_partial_tp(
+    broker: BaseBroker,
     state: TradingState,
-    latest_price: float,
-    signal: str,
     current_qty: float,
-    action: str,
-    open_order_exists: bool,
-    equity: float,
-) -> None:
-    """Metrics emission disabled: keeps call-sites stable without file writes."""
-    return None
+    r_multiple: float,
+    latest_price: float,
+    sleep_enabled: bool,
+) -> bool:
+    """Take partial profits at TP1/TP2 R-multiples; return True if a partial fired."""
+    if current_qty == 0:
+        return False
+    is_long = current_qty > 0
+    abs_qty = abs(current_qty)
+    side = "LONG" if is_long else "SHORT"
+    verb = "closed" if is_long else "covered"
+    submit = broker.submit_sell if is_long else broker.submit_buy
+
+    triggers = [
+        ("partial_tp1_taken", PARTIAL_TP1_R, PARTIAL_TP1_FRACTION, "TP1"),
+        ("partial_tp2_taken", PARTIAL_TP2_R, PARTIAL_TP2_FRACTION, "TP2"),
+    ]
+    for attr, r_mult, frac, label in triggers:
+        if getattr(state, attr) or r_multiple < r_mult:
+            continue
+        qty_to_close = round(max(0.0, abs_qty * frac), 6)
+        if not (0 < qty_to_close < abs_qty):
+            continue
+        if _submit_with_guard(
+            lambda q=qty_to_close: submit(SYMBOL, q),
+            state,
+            f"partial {label.lower()} {side.lower()}",
+            sleep_enabled,
+        ):
+            setattr(state, attr, True)
+            logger.info("PARTIAL %s %s: %s %.6f @ ~%.2f", label, side, verb, qty_to_close, latest_price)
+            return True
+    return False
 
 
 # ------------------------------------------------------------------
@@ -445,9 +470,6 @@ def run_once(
                 state.open_order_streak,
             )
         logger.info("Open order already exists. Skipping cycle.")
-        _emit_cycle_metrics(
-            state, latest_price, signal, current_qty, "SKIP_OPEN_ORDER", open_order_exists, equity
-        )
         if sleep_enabled:
             time.sleep(CHECK_INTERVAL_SECONDS)
         return
@@ -479,63 +501,9 @@ def run_once(
                 state.break_even_armed = True
                 logger.info("BREAK-EVEN armed at %.2fR", r_multiple)
 
-            if current_qty > 0:
-                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
-                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
-                if p1_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp1 long",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp1_taken = True
-                            logger.info("PARTIAL TP1 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-                if p2_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp2 long",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp2_taken = True
-                            logger.info("PARTIAL TP2 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-            else:
-                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
-                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
-                if p1_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp1 short",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp1_taken = True
-                            logger.info("PARTIAL TP1 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-                if p2_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp2 short",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp2_taken = True
-                            logger.info("PARTIAL TP2 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-
-            # Use intrabar extremes (h/l) for trigger checks so exits are
-            # consistent with how backtests evaluate standing stops/targets.
+            # Priority order: stop > take-profit > partial. Stops must win when the
+            # same bar shows both a stop hit and a partial trigger so a sudden
+            # reversal can't be ignored just because the high also touched the partial.
             long_stop_level = state.position_high - stop_dist
             short_stop_level = state.position_low + stop_dist
             if state.break_even_armed:
@@ -573,10 +541,6 @@ def run_once(
                     )
                     ref = state.position_low
                 if not ok:
-                    _emit_cycle_metrics(
-                        state, latest_price, signal, current_qty, "ORDER_ERROR_EXIT",
-                        open_order_exists, equity
-                    )
                     return
 
                 state.reset_watermarks(latest_price)
@@ -586,77 +550,15 @@ def run_once(
                     f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
                     f"stop_dist={stop_dist:.2f}, tp_dist={tp_dist:.2f})"
                 )
-                _emit_cycle_metrics(
-                    state, latest_price, signal, current_qty, f"EXIT_{exit_reason.replace(' ', '_')}",
-                    open_order_exists, equity
-                )
                 if sleep_enabled:
                     time.sleep(CHECK_INTERVAL_SECONDS)
                 return
 
-            # Priority order: stop > partial > TP (TP did not trigger above).
-            if current_qty > 0:
-                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
-                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
-                if p1_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp1 long",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp1_taken = True
-                            state.log_event(state.cycles, "PARTIAL_TP1_LONG", {"qty": qty_to_close, "price": latest_price})
-                            logger.info("PARTIAL TP1 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-                if p2_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp2 long",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp2_taken = True
-                            state.log_event(state.cycles, "PARTIAL_TP2_LONG", {"qty": qty_to_close, "price": latest_price})
-                            logger.info("PARTIAL TP2 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-            else:
-                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
-                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
-                if p1_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp1 short",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp1_taken = True
-                            state.log_event(state.cycles, "PARTIAL_TP1_SHORT", {"qty": qty_to_close, "price": latest_price})
-                            logger.info("PARTIAL TP1 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
-                if p2_trigger:
-                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
-                    if 0 < qty_to_close < abs(current_qty):
-                        if _submit_with_guard(
-                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
-                            state,
-                            "partial tp2 short",
-                            sleep_enabled,
-                        ):
-                            state.partial_tp2_taken = True
-                            state.log_event(state.cycles, "PARTIAL_TP2_SHORT", {"qty": qty_to_close, "price": latest_price})
-                            logger.info("PARTIAL TP2 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
-                            return
+            if _maybe_take_partial_tp(broker, state, current_qty, r_multiple, latest_price, sleep_enabled):
+                return
 
     # --- Signal execution ---
     qty = position_size(equity, buying_power, stop_dist, latest_price)
-    action = "HOLD"
     est_cost = latest_price * ESTIMATED_ROUND_TRIP_COST_PCT
     rr_after_cost = (tp_dist - est_cost) / max(1e-9, stop_dist + est_cost)
     allow_new_entry = rr_after_cost >= MIN_EXPECTED_RR
@@ -672,24 +574,18 @@ def run_once(
                 "cover short",
                 sleep_enabled,
             ):
-                _emit_cycle_metrics(
-                    state, latest_price, signal, current_qty, "ORDER_ERROR_COVER", open_order_exists, equity
-                )
                 return
             state.reset_watermarks(latest_price)
             logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
-            action = "COVER_SHORT"
         else:
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
-                action = "SKIP_NO_BUYING_POWER"
             elif not allow_new_entry:
                 logger.info(
                     "Skipping long: expected RR after costs %.2f < min %.2f",
                     rr_after_cost,
                     MIN_EXPECTED_RR,
                 )
-                action = "SKIP_LOW_RR"
             else:
                 sl_price = round(latest_price - stop_dist, 8)
                 tp_price = round(latest_price + tp_dist, 8)
@@ -699,9 +595,6 @@ def run_once(
                     "open long",
                     sleep_enabled,
                 ):
-                    _emit_cycle_metrics(
-                        state, latest_price, signal, current_qty, "ORDER_ERROR_OPEN_LONG", open_order_exists, equity
-                    )
                     return
                 state.position_high = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
@@ -709,7 +602,6 @@ def run_once(
                     f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
                 )
-                action = "OPEN_LONG"
 
     elif signal == "SELL":
         if current_qty < 0:
@@ -722,30 +614,22 @@ def run_once(
                 "close long",
                 sleep_enabled,
             ):
-                _emit_cycle_metrics(
-                    state, latest_price, signal, current_qty, "ORDER_ERROR_CLOSE_LONG", open_order_exists, equity
-                )
                 return
             state.reset_watermarks(latest_price)
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
-            action = "CLOSE_LONG"
         else:
             if not ALLOW_SHORTS:
                 logger.info("SELL signal — ALLOW_SHORTS=False, staying flat.")
-                action = "SKIP_SHORTS_DISABLED"
             elif not broker.supports_shorting:
                 logger.info("SELL signal — broker does not support shorting, staying flat.")
-                action = "SKIP_NO_SHORTING"
             elif qty <= 0:
                 logger.info("Insufficient equity to open short.")
-                action = "SKIP_NO_EQUITY"
             elif not allow_new_entry:
                 logger.info(
                     "Skipping short: expected RR after costs %.2f < min %.2f",
                     rr_after_cost,
                     MIN_EXPECTED_RR,
                 )
-                action = "SKIP_LOW_RR"
             else:
                 sl_price = round(latest_price + stop_dist, 8)
                 tp_price = round(latest_price - tp_dist, 8)
@@ -755,9 +639,6 @@ def run_once(
                     "open short",
                     sleep_enabled,
                 ):
-                    _emit_cycle_metrics(
-                        state, latest_price, signal, current_qty, "ORDER_ERROR_OPEN_SHORT", open_order_exists, equity
-                    )
                     return
                 state.position_low = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
@@ -765,15 +646,9 @@ def run_once(
                     f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
                 )
-                action = "OPEN_SHORT"
 
     else:
         logger.info("No action.")
-        action = "NO_ACTION"
-
-    _emit_cycle_metrics(
-        state, latest_price, signal, current_qty, action, open_order_exists, equity
-    )
 
     if sleep_enabled:
         time.sleep(CHECK_INTERVAL_SECONDS)
