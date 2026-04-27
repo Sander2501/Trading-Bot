@@ -115,6 +115,9 @@ python run_backtest.py
 Replays `historical_data.csv` and prints a performance report:
 
 ```
+
+If your CSV is 1-minute data and `TIMEFRAME` is set higher (e.g. `15Min`),
+the backtest broker will resample OHLC internally to the requested timeframe.
 ========================================
        BACKTEST PERFORMANCE
 ========================================
@@ -275,6 +278,7 @@ pytest -q
 | `Could not open requirements file: requirements.txt` | `cd` into the repo root first (the folder containing `requirements.txt`) and retry |
 | `Missing CAPITAL_API_KEY` | Create `.env` from `.env.example` and fill credentials |
 | `FileNotFoundError: historical_data.csv` | Provide a CSV with at least a `c` (close) column |
+| Backtest shows zero/too-few trades with short history | Fetch a longer dataset (e.g. `python scripts/fetch_history.py --years 2 --interval 1m --out historical_data.csv`) |
 | Signal stays `HOLD` forever | ADX may be low (choppy market). Lower `ADX_THRESHOLD` or wait for a trending period |
 | `ValueError: RISK_PER_TRADE … must be in (0, 0.10]` | Reduce `RISK_PER_TRADE` in `.env` to 0.02 or less |
 | Tests fail on collection | Run `pip install -r requirements.txt` to install `pytest` |

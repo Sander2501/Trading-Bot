@@ -4,7 +4,7 @@ scripts/fetch_history.py
 Fetch OHLCV history from the Binance public REST API (no API key needed)
 and write a CSV file compatible with BacktestBroker.
 
-Output columns: t, h, l, c
+Output columns: t, h, l, c, v
   t – ISO-8601 UTC timestamp (bar open time)
   h – bar high
   l – bar low
@@ -17,6 +17,9 @@ Usage examples
 
   # Last 30 days, custom output path
   python scripts/fetch_history.py --days 30 --out data/btc_30d.csv
+
+  # Long horizon (2 years of 1m bars)
+  python scripts/fetch_history.py --years 2 --out data/btc_2y_1m.csv
 
   # Different pair / interval
   python scripts/fetch_history.py --symbol ETHUSDT --interval 5m --days 14
@@ -147,6 +150,10 @@ def main() -> None:
         help="Number of days of history to fetch",
     )
     parser.add_argument(
+        "--years", type=float, default=0.0,
+        help="Optional years of history to fetch (overrides --days if > 0)",
+    )
+    parser.add_argument(
         "--out", default="historical_data.csv",
         help="Output CSV path",
     )
@@ -158,14 +165,15 @@ def main() -> None:
     args = parser.parse_args()
 
     now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
-    start_dt = datetime.now(tz=timezone.utc) - timedelta(days=args.days)
+    days = args.days if args.years <= 0 else args.years * 365.25
+    start_dt = datetime.now(tz=timezone.utc) - timedelta(days=days)
     start_ms = int(start_dt.timestamp() * 1000)
 
     bar_ms = _interval_ms(args.interval)
     expected = int((now_ms - start_ms) / bar_ms)
     print(
         f"Fetching ~{expected:,} {args.interval} bars for {args.symbol} "
-        f"over {args.days:.1f} days  →  {args.out}",
+        f"over {days:.1f} days  →  {args.out}",
         flush=True,
     )
 
@@ -179,13 +187,13 @@ def main() -> None:
     # [0] open time ms, [1] open, [2] high, [3] low, [4] close, [5] volume, …
     with open(args.out, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["t", "h", "l", "c"])
+        writer.writerow(["t", "h", "l", "c", "v"])
         for row in rows:
             open_time_ms: int = row[0]
             ts = datetime.fromtimestamp(open_time_ms / 1000, tz=timezone.utc).strftime(
                 "%Y-%m-%d %H:%M:%S"
             )
-            writer.writerow([ts, row[2], row[3], row[4]])  # h, l, c
+            writer.writerow([ts, row[2], row[3], row[4], row[5]])  # h, l, c, v
 
     print(f"\nDone — wrote {len(rows):,} bars to {args.out}", flush=True)
     print(

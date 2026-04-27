@@ -202,6 +202,25 @@ class TestSubmitSell:
         broker.submit_sell("BTC/USD", 1.0)
         assert broker.get_entry_price("BTC/USD") is None
 
+    def test_sell_after_done_with_partial_fill_model_does_not_oob(self):
+        """
+        Regression: final liquidation in run_backtest can call submit_sell when
+        cursor == len(closes). Partial-fill path must clamp index access.
+        """
+        broker = _simple_broker(
+            [100.0, 101.0, 102.0],
+            starting_cash=10_000.0,
+            slippage_pct=0.0,
+            partial_fill_min=0.8,
+        )
+        broker.submit_buy("BTC/USD", 1.0)
+        while not broker.done():
+            broker.advance()
+        # Should not raise IndexError.
+        qty_before = broker.get_position_qty("BTC/USD")
+        broker.submit_sell("BTC/USD", broker.get_position_qty("BTC/USD"))
+        assert broker.get_position_qty("BTC/USD") < qty_before
+
 
 # ---------------------------------------------------------------------------
 # Equity / buying power
@@ -262,3 +281,28 @@ class TestMarketStatus:
         # After sorting, first close should be 100.0
         bars = broker.get_recent_bars("BTC/USD", limit=1)
         assert float(bars["c"].iloc[-1]) == pytest.approx(100.0)
+
+    def test_get_recent_bars_resamples_by_timeframe(self):
+        rows = [
+            {"t": "2024-01-01 00:00:00", "h": 101.0, "l": 99.0, "c": 100.0},
+            {"t": "2024-01-01 00:01:00", "h": 102.0, "l": 100.0, "c": 101.0},
+            {"t": "2024-01-01 00:02:00", "h": 103.0, "l": 101.0, "c": 102.0},
+            {"t": "2024-01-01 00:03:00", "h": 104.0, "l": 102.0, "c": 103.0},
+            {"t": "2024-01-01 00:04:00", "h": 105.0, "l": 103.0, "c": 104.0},
+            {"t": "2024-01-01 00:05:00", "h": 106.0, "l": 104.0, "c": 105.0},
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+            tmp_path = f.name
+        _write_csv(rows, tmp_path)
+        broker = BacktestBroker(tmp_path, symbol="BTC/USD")
+        os.unlink(tmp_path)
+
+        # Move cursor to the latest bar.
+        while not broker.done():
+            broker.advance()
+
+        bars_5m = broker.get_recent_bars("BTC/USD", limit=10, timeframe="5Min")
+        # 00:00-00:04 and 00:05 only => at least 2 bars expected.
+        assert len(bars_5m) >= 2
+        assert float(bars_5m["h"].iloc[0]) == pytest.approx(105.0)
+        assert float(bars_5m["l"].iloc[0]) == pytest.approx(99.0)

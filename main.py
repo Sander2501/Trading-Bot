@@ -32,6 +32,10 @@ from config import (
     ADAPTIVE_ATR_PERCENTILE,
     ADAPTIVE_LOOKBACK_DAYS,
     ADAPTIVE_THRESHOLDS_ENABLED,
+    ATR_ACCEL_WINDOW,
+    BACKTEST_DYNAMIC_SLIPPAGE_K,
+    BACKTEST_LATENCY_BARS,
+    BACKTEST_PARTIAL_FILL_MIN,
     BREAK_EVEN_R_MULT,
     CHECK_INTERVAL_SECONDS,
     COMMISSION_PER_TRADE,
@@ -47,8 +51,10 @@ from config import (
     MAX_DAILY_LOSS_PCT,
     MAX_GROSS_EXPOSURE_PCT,
     MAX_ORDER_ERRORS,
+    MIN_ATR_ACCEL,
     MIN_EXPECTED_RR,
     ESTIMATED_ROUND_TRIP_COST_PCT,
+    MIN_VOLUME,
     OPEN_ORDER_STALE_CYCLES,
     ORDER_ERROR_COOLDOWN_SECONDS,
     RSI_OVERBOUGHT,
@@ -114,6 +120,7 @@ class TradingState:
         self.break_even_armed: bool = False
         self.partial_tp1_taken: bool = False
         self.partial_tp2_taken: bool = False
+        self.events: list[dict] = []
         self.last_snapshot_date: date | None = None
         self.open_order_streak: int = 0
         self.cycles: int = 0
@@ -132,6 +139,13 @@ class TradingState:
         self.partial_tp1_taken = False
         self.partial_tp2_taken = False
 
+    def log_event(self, cycle: int, event: str, details: dict | None = None) -> None:
+        payload = {"cycle": cycle, "event": event, **(details or {})}
+        self.events.append(payload)
+        if len(self.events) > 1000:
+            self.events = self.events[-1000:]
+
+
     def save(self, path: str = STATE_FILE) -> None:
         """Persist state to *path* so the bot can recover after a crash."""
         data = {
@@ -142,6 +156,7 @@ class TradingState:
             "break_even_armed": self.break_even_armed,
             "partial_tp1_taken": self.partial_tp1_taken,
             "partial_tp2_taken": self.partial_tp2_taken,
+            "events": self.events[-200:],
             "last_snapshot_date": self.last_snapshot_date.isoformat() if self.last_snapshot_date else None,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -164,6 +179,7 @@ class TradingState:
             state.break_even_armed = bool(data.get("break_even_armed", False))
             state.partial_tp1_taken = bool(data.get("partial_tp1_taken", False))
             state.partial_tp2_taken = bool(data.get("partial_tp2_taken", False))
+            state.events = list(data.get("events") or [])
             d = data.get("last_snapshot_date")
             state.last_snapshot_date = date.fromisoformat(d) if d else None
             logger.info("Restored trading state from %s.", path)
@@ -444,12 +460,12 @@ def run_once(
         session_filter_enabled=SESSION_FILTER_ENABLED,
         session_start_hour_utc=SESSION_START_HOUR_UTC,
         session_end_hour_utc=SESSION_END_HOUR_UTC,
-        volume_filter_enabled=VOLUME_FILTER_ENABLED,
-        min_volume=0.0,
+        atr_accel_window=ATR_ACCEL_WINDOW,
+        min_atr_accel=MIN_ATR_ACCEL,
         structure_filter_enabled=STRUCTURE_FILTER_ENABLED,
         structure_lookback=STRUCTURE_LOOKBACK,
-        atr_accel_window=0,
-        min_atr_accel=0.0,
+        volume_filter_enabled=VOLUME_FILTER_ENABLED,
+        min_volume=MIN_VOLUME,
     )
     current_qty = broker.get_position_qty(SYMBOL)
     open_order_exists = broker.has_open_order(SYMBOL)
@@ -499,6 +515,7 @@ def run_once(
 
             if not state.break_even_armed and r_multiple >= BREAK_EVEN_R_MULT:
                 state.break_even_armed = True
+                state.log_event(state.cycles, "BREAK_EVEN_ARMED", {"r_multiple": round(r_multiple, 4)})
                 logger.info("BREAK-EVEN armed at %.2fR", r_multiple)
 
             # Priority order: stop > take-profit > partial. Stops must win when the
@@ -545,6 +562,7 @@ def run_once(
 
                 state.reset_watermarks(latest_price)
                 state.seed_trade_context(0.0, 0.0)
+                state.log_event(state.cycles, f"EXIT_{exit_reason.replace(' ', '_')}", {"price": latest_price})
                 logger.warning(
                     f"{exit_reason}: closed {abs(current_qty):.6f} {SYMBOL} "
                     f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
@@ -559,7 +577,12 @@ def run_once(
 
     # --- Signal execution ---
     qty = position_size(equity, buying_power, stop_dist, latest_price)
-    est_cost = latest_price * ESTIMATED_ROUND_TRIP_COST_PCT
+    bar_range_pct = max(0.0, (latest_high - latest_low) / max(latest_price, 1e-9))
+    latency_penalty = 0.0001 * BACKTEST_LATENCY_BARS
+    partial_fill_penalty = (1.0 - BACKTEST_PARTIAL_FILL_MIN) * 0.0005
+    est_slippage_pct = SLIPPAGE_PCT + BACKTEST_DYNAMIC_SLIPPAGE_K * bar_range_pct + latency_penalty + partial_fill_penalty
+    commission_per_unit = (COMMISSION_PER_TRADE / max(qty, 1e-9)) if qty > 0 else 0.0
+    est_cost = 2.0 * (latest_price * est_slippage_pct + commission_per_unit) + latest_price * ESTIMATED_ROUND_TRIP_COST_PCT
     rr_after_cost = (tp_dist - est_cost) / max(1e-9, stop_dist + est_cost)
     allow_new_entry = rr_after_cost >= MIN_EXPECTED_RR
 
@@ -598,6 +621,7 @@ def run_once(
                     return
                 state.position_high = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
+                state.log_event(state.cycles, "OPEN_LONG", {"qty": qty, "price": latest_price})
                 logger.info(
                     f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
@@ -642,6 +666,7 @@ def run_once(
                     return
                 state.position_low = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
+                state.log_event(state.cycles, "OPEN_SHORT", {"qty": qty, "price": latest_price})
                 logger.info(
                     f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
                     f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
