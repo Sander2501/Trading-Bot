@@ -9,13 +9,12 @@ Run with::
 
 Replays ``historical_data.csv`` (or the file set by ``BACKTEST_CSV``) through
 the same ``run_once`` loop used in live trading, then prints a full
-performance report and saves ``backtest_report.json``.
+performance report.
 """
 
-import json
 import statistics
 from collections import deque
-from datetime import datetime, timezone
+from random import Random
 
 from brokers import BacktestBroker
 from config import (
@@ -24,6 +23,7 @@ from config import (
     BACKTEST_PARTIAL_FILL_MIN,
     COMMISSION_PER_TRADE,
     CSV_PATH,
+    MIN_EVAL_TRADES,
     SLIPPAGE_PCT,
     STARTING_CASH,
     SYMBOL,
@@ -114,6 +114,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
             short_lots.append((qty, price))
 
     total_trips = len(wins) + len(losses)
+    trade_pnls = wins + losses
     win_rate = len(wins) / total_trips * 100 if total_trips > 0 else 0.0
     avg_win = sum(wins) / len(wins) if wins else 0.0
     avg_loss = sum(losses) / len(losses) if losses else 0.0
@@ -135,6 +136,7 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         return mapping.get(tf, 365 * 24 * 4)  # default to 15Min
 
     sharpe = 0.0
+    bar_returns: list[float] = []
     if len(equity_curve) > 1:
         bar_returns = [
             (equity_curve[i] - equity_curve[i - 1]) / equity_curve[i - 1]
@@ -147,6 +149,73 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
                 bars_per_year = _bars_per_year(TIMEFRAME)
                 sharpe = statistics.mean(bar_returns) / std_r * (bars_per_year**0.5)
 
+    def _bootstrap_ci(values: list[float], stat_fn, n_boot: int = 500, alpha: float = 0.05) -> tuple[float | None, float | None]:
+        if not values:
+            return None, None
+        rng = Random(42)
+        boot = []
+        n = len(values)
+        for _ in range(n_boot):
+            sample = [values[rng.randrange(n)] for _ in range(n)]
+            s = stat_fn(sample)
+            if s is not None:
+                boot.append(float(s))
+        if not boot:
+            return None, None
+        boot.sort()
+        lo_i = int((alpha / 2) * (len(boot) - 1))
+        hi_i = int((1 - alpha / 2) * (len(boot) - 1))
+        return boot[lo_i], boot[hi_i]
+
+    def _pf(samples: list[float]) -> float | None:
+        pos = [x for x in samples if x > 0]
+        neg = [x for x in samples if x < 0]
+        if not neg:
+            return None
+        return sum(pos) / abs(sum(neg))
+
+    def _sh(samples: list[float]) -> float | None:
+        if len(samples) < 2:
+            return None
+        std = statistics.stdev(samples)
+        if std <= 0:
+            return None
+        return statistics.mean(samples) / std
+
+    pf_ci_low, pf_ci_high = _bootstrap_ci(trade_pnls, _pf)
+    sh_ci_low, sh_ci_high = _bootstrap_ci(bar_returns, _sh)
+
+    monthly_returns: dict[str, float] = {}
+    regime_trade_counts = {"TRENDING": 0, "RANGING": 0}
+    ts = getattr(broker, "_timestamps", None)
+    if ts is not None and len(ts) > 0:
+        for i in range(1, len(equity_curve)):
+            if i >= len(ts):
+                break
+            month = str(ts.iloc[i])[:7]
+            prev = equity_curve[i - 1]
+            if prev > 0:
+                monthly_returns.setdefault(month, 1.0)
+                monthly_returns[month] *= 1.0 + (equity_curve[i] - prev) / prev
+        monthly_returns = {m: (v - 1.0) * 100.0 for m, v in monthly_returns.items()}
+
+    for i in range(1, len(equity_curve)):
+        if i >= len(equity_curve):
+            break
+        if i <= 0:
+            continue
+        lookback = max(0, i - 20)
+        recent = equity_curve[lookback:i + 1]
+        if len(recent) < 2:
+            continue
+        changes = [abs(recent[j] - recent[j - 1]) for j in range(1, len(recent))]
+        if sum(changes) == 0:
+            regime_trade_counts["RANGING"] += 1
+        else:
+            regime_trade_counts["TRENDING"] += 1
+
+    quality_gate_pass = len(trades) >= MIN_EVAL_TRADES
+
     return {
         "roi_pct": roi,
         "max_drawdown_pct": max_dd * 100,
@@ -157,6 +226,12 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         "sharpe_ratio": sharpe,
         "total_trades": len(trades),
         "final_equity": final_equity,
+        "metrics_quality_gate_pass": quality_gate_pass,
+        "min_eval_trades_required": MIN_EVAL_TRADES,
+        "pf_ci_95": [pf_ci_low, pf_ci_high],
+        "sharpe_ci_95": [sh_ci_low, sh_ci_high],
+        "monthly_returns_pct": monthly_returns,
+        "regime_bar_counts": regime_trade_counts,
     }
 
 
@@ -217,34 +292,10 @@ def main() -> None:
     print(f"Avg Win          : ${m['avg_win']:>12.2f}")
     print(f"Avg Loss         : ${m['avg_loss']:>12.2f}")
     print(f"Total Fills      : {m['total_trades']:>12}")
+    print(f"Quality Gate     : {'PASS' if m['metrics_quality_gate_pass'] else 'FAIL'} (min trades={m['min_eval_trades_required']})")
+    print(f"PF 95% CI        : {m['pf_ci_95']}")
+    print(f"Sharpe 95% CI    : {m['sharpe_ci_95']}")
     print("="*40)
-
-    if broker.trades:
-        print("\nTRADE LOG:")
-        for t in broker.trades:
-            print(
-                f"  [{t['t']:>4}] {t['side']:<5}  {t['qty']:.6f}"
-                f" @ {t['price']:>10,.2f}  equity={t['equity']:>12,.2f}"
-            )
-
-    # ------------------------------------------------------------------
-    # Save machine-readable report
-    # ------------------------------------------------------------------
-    # Replace non-finite floats (inf, nan) so the JSON is always valid.
-    def _safe(v):
-        if isinstance(v, float) and not (v == v) or (isinstance(v, float) and abs(v) == float("inf")):
-            return None
-        return v
-
-    report = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "starting_cash": STARTING_CASH,
-        **{k: _safe(v) for k, v in m.items()},
-    }
-    with open("backtest_report.json", "w") as fh:
-        json.dump(report, fh, indent=2)
-    print("\nReport saved to backtest_report.json")
-
 
 if __name__ == "__main__":
     main()

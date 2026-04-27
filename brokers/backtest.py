@@ -339,8 +339,9 @@ class BacktestBroker(BaseBroker):
         if self._partial_fill_min >= 1:
             return qty
         close = max(self._current_price(), 1e-9)
-        high = float(self._highs.iloc[self._cursor])
-        low = float(self._lows.iloc[self._cursor])
+        idx = min(self._cursor, len(self._highs) - 1)
+        high = float(self._highs.iloc[idx])
+        low = float(self._lows.iloc[idx])
         bar_range_pct = max(0.0, (high - low) / close)
         # Deterministic fill model: fuller fills on higher-vol bars.
         ratio = self._partial_fill_min + (1 - self._partial_fill_min) * min(1.0, bar_range_pct / 0.01)
@@ -392,11 +393,11 @@ class BacktestBroker(BaseBroker):
             sl_hit = self._sl_price is not None and low  <= self._sl_price
             tp_hit = self._tp_price is not None and high >= self._tp_price
             if sl_hit:
-                fill = self._sl_price
+                fill = float(self._sl_price) * (1 - self._effective_slippage())
                 self._close_position_at(fill, qty, "SL_STOP")
                 logger.info("SL triggered on long @ %.4f", fill)
             elif tp_hit:
-                fill = self._tp_price
+                fill = float(self._tp_price) * (1 - self._effective_slippage())
                 self._close_position_at(fill, qty, "TP_STOP")
                 logger.info("TP triggered on long @ %.4f", fill)
 
@@ -404,11 +405,11 @@ class BacktestBroker(BaseBroker):
             sl_hit = self._sl_price is not None and high >= self._sl_price
             tp_hit = self._tp_price is not None and low  <= self._tp_price
             if sl_hit:
-                fill = self._sl_price
+                fill = float(self._sl_price) * (1 + self._effective_slippage())
                 self._cover_position_at(fill, qty, "SL_STOP")
                 logger.info("SL triggered on short @ %.4f", fill)
             elif tp_hit:
-                fill = self._tp_price
+                fill = float(self._tp_price) * (1 + self._effective_slippage())
                 self._cover_position_at(fill, qty, "TP_STOP")
                 logger.info("TP triggered on short @ %.4f", fill)
 

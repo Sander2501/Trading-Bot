@@ -57,6 +57,24 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) ->
     return float(adx.iloc[-1])
 
 
+def _adx_series(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    """Return full ADX series so adaptive thresholds can be percentile-based."""
+    tr = _true_range(high, low, close)
+    atr = tr.ewm(com=window - 1, adjust=False).mean()
+
+    up_move = high.diff()
+    down_move = -(low.diff())
+    dm_plus = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    dm_minus = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    safe_atr = atr.replace(0, float("inf"))
+    di_plus = dm_plus.ewm(com=window - 1, adjust=False).mean() / safe_atr * 100
+    di_minus = dm_minus.ewm(com=window - 1, adjust=False).mean() / safe_atr * 100
+    di_sum = (di_plus + di_minus).replace(0, float("inf"))
+    dx = (di_plus - di_minus).abs() / di_sum * 100
+    return dx.ewm(com=window - 1, adjust=False).mean()
+
+
 def atr_stop_distance(
     high: pd.Series, low: pd.Series, close: pd.Series,
     window: int = 14, multiplier: float = 2.0
@@ -81,6 +99,18 @@ def moving_average_signal(
     adx_window: int = 14,
     adx_threshold: float = 20.0,
     min_atr_pct: float = 0.001,
+    adaptive_lookback_bars: int = 0,
+    adx_threshold_percentile: float = 60.0,
+    min_atr_pct_percentile: float = 35.0,
+    session_filter_enabled: bool = False,
+    session_start_hour_utc: int = 0,
+    session_end_hour_utc: int = 24,
+    atr_accel_window: int = 20,
+    min_atr_accel: float = 0.0,
+    structure_filter_enabled: bool = False,
+    structure_lookback: int = 5,
+    volume_filter_enabled: bool = False,
+    min_volume: float = 0.0,
 ) -> str:
     """
     Strategy with Market Regime Filter, RSI Entry Timing, and confirmed crossovers.
@@ -99,6 +129,8 @@ def moving_average_signal(
     closes = bars["c"]
     highs  = bars["h"]
     lows   = bars["l"]
+    ts = bars.get("t")
+    vols = bars.get("v")
 
     # Need confirm_bars + 1 extra to check the bar before the crossover
     min_bars = max(trend_window, macd_slow, rsi_window) + confirm_bars + 5
@@ -116,20 +148,63 @@ def moving_average_signal(
 
     rsi = _rsi(closes, window=rsi_window)
     _, _, macd_hist = _macd(closes, macd_fast, macd_slow, macd_signal)
-    adx = _adx(highs, lows, closes, adx_window)
+    adx_s = _adx_series(highs, lows, closes, adx_window)
+    adx = float(adx_s.iloc[-1])
     atr = _true_range(highs, lows, closes).ewm(com=adx_window - 1, adjust=False).mean()
-    atr_pct = float(atr.iloc[-1]) / latest_close if latest_close > 0 else 0.0
+    atr_pct_series = (atr / closes.replace(0, float("nan"))).fillna(0.0)
+    atr_pct = float(atr_pct_series.iloc[-1]) if latest_close > 0 else 0.0
 
-    if atr_pct < min_atr_pct:
-        logger.info("REGIME: LOW_VOL (ATR%% %.4f < %.4f) | Skipping.", atr_pct, min_atr_pct)
+    adx_threshold_eff = adx_threshold
+    min_atr_pct_eff = min_atr_pct
+    if adaptive_lookback_bars and adaptive_lookback_bars > 1:
+        lookback = min(int(adaptive_lookback_bars), len(closes))
+        adx_threshold_eff = float(adx_s.tail(lookback).quantile(adx_threshold_percentile / 100.0))
+        min_atr_pct_eff = float(atr_pct_series.tail(lookback).quantile(min_atr_pct_percentile / 100.0))
+
+    if atr_pct < min_atr_pct_eff:
+        logger.info("REGIME: LOW_VOL (ATR%% %.4f < %.4f) | Skipping.", atr_pct, min_atr_pct_eff)
         return "HOLD"
 
-    if adx < adx_threshold:
-        logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold)
+    if adx < adx_threshold_eff:
+        logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold_eff)
         return "HOLD"
+
+    if session_filter_enabled and ts is not None:
+        try:
+            hour = pd.to_datetime(ts.iloc[-1], utc=True).hour
+            if not (session_start_hour_utc <= hour < session_end_hour_utc):
+                logger.info(
+                    "REGIME: OUT_OF_SESSION (hour=%d, allowed=[%d,%d)) | Skipping.",
+                    hour,
+                    session_start_hour_utc,
+                    session_end_hour_utc,
+                )
+                return "HOLD"
+        except Exception:
+            pass
+
+    if atr_accel_window > 1 and min_atr_accel > 0:
+        atr_baseline = float(atr_pct_series.tail(atr_accel_window).mean())
+        atr_accel = (atr_pct / atr_baseline) if atr_baseline > 0 else 0.0
+        if atr_accel < min_atr_accel:
+            logger.info(
+                "REGIME: LOW_ATR_ACCEL (%.3f < %.3f) | Skipping.",
+                atr_accel,
+                min_atr_accel,
+            )
+            return "HOLD"
+
+    if volume_filter_enabled and vols is not None:
+        try:
+            latest_vol = float(vols.iloc[-1])
+            if latest_vol < min_volume:
+                logger.info("REGIME: LOW_VOLUME (%.2f < %.2f) | Skipping.", latest_vol, min_volume)
+                return "HOLD"
+        except Exception:
+            pass
 
     trend  = "BULL" if latest_close > curr_trend else "BEAR"
-    regime = "TRENDING" if adx > 25 else "RANGING"
+    regime = "TRENDING" if adx > adx_threshold_eff else "RANGING"
 
     logger.info(
         "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f atr%%=%.3f",
@@ -154,16 +229,25 @@ def moving_average_signal(
         was_above = float(fast_ema.iloc[-(confirm_bars + 1)]) >= float(slow_ema.iloc[-(confirm_bars + 1)])
         return held and was_above
 
+    if structure_filter_enabled and len(highs) >= structure_lookback + 1:
+        recent_highs = highs.tail(structure_lookback + 1)
+        recent_lows = lows.tail(structure_lookback + 1)
+        bull_structure = bool(recent_highs.iloc[-1] > recent_highs.iloc[0] and recent_lows.iloc[-1] > recent_lows.iloc[0])
+        bear_structure = bool(recent_highs.iloc[-1] < recent_highs.iloc[0] and recent_lows.iloc[-1] < recent_lows.iloc[0])
+    else:
+        bull_structure = True
+        bear_structure = True
+
     if trend == "BULL":
         is_ema_bull  = curr_fast > curr_slow
         is_macd_bull = macd_hist > 0
         is_rsi_dip   = rsi < 45
 
         if regime == "TRENDING":
-            if is_ema_bull and is_macd_bull and is_rsi_dip:
+            if is_ema_bull and is_macd_bull and is_rsi_dip and bull_structure:
                 logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Dip)")
                 return "BUY"
-            if _bull_crossover_confirmed():
+            if _bull_crossover_confirmed() and bull_structure:
                 logger.info("SIGNAL: CONFIRMED CROSSOVER BUY (%d bars)", confirm_bars)
                 return "BUY"
         else:
@@ -177,10 +261,10 @@ def moving_average_signal(
         is_rsi_spike = rsi > 55
 
         if regime == "TRENDING":
-            if is_ema_bear and is_macd_bear and is_rsi_spike:
+            if is_ema_bear and is_macd_bear and is_rsi_spike and bear_structure:
                 logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Spike)")
                 return "SELL"
-            if _bear_crossover_confirmed():
+            if _bear_crossover_confirmed() and bear_structure:
                 logger.info("SIGNAL: CONFIRMED CROSSOVER SELL (%d bars)", confirm_bars)
                 return "SELL"
         else:

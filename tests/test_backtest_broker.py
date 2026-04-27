@@ -202,6 +202,25 @@ class TestSubmitSell:
         broker.submit_sell("BTC/USD", 1.0)
         assert broker.get_entry_price("BTC/USD") is None
 
+    def test_sell_after_done_with_partial_fill_model_does_not_oob(self):
+        """
+        Regression: final liquidation in run_backtest can call submit_sell when
+        cursor == len(closes). Partial-fill path must clamp index access.
+        """
+        broker = _simple_broker(
+            [100.0, 101.0, 102.0],
+            starting_cash=10_000.0,
+            slippage_pct=0.0,
+            partial_fill_min=0.8,
+        )
+        broker.submit_buy("BTC/USD", 1.0)
+        while not broker.done():
+            broker.advance()
+        # Should not raise IndexError.
+        qty_before = broker.get_position_qty("BTC/USD")
+        broker.submit_sell("BTC/USD", broker.get_position_qty("BTC/USD"))
+        assert broker.get_position_qty("BTC/USD") < qty_before
+
 
 # ---------------------------------------------------------------------------
 # Equity / buying power
