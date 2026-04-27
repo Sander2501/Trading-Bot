@@ -25,6 +25,7 @@ GRID = {
     "ATR_STOP_MULT": [1.5, 2.0, 2.5],
     "TAKE_PROFIT_MULT": [3.0, 4.0, 5.0],
     "CONFIRM_BARS": [1, 2, 3],
+    "BACKTEST_LATENCY_BARS": [0, 1],
 }
 
 

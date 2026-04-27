@@ -57,6 +57,24 @@ def _adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) ->
     return float(adx.iloc[-1])
 
 
+def _adx_series(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
+    """Return full ADX series so adaptive thresholds can be percentile-based."""
+    tr = _true_range(high, low, close)
+    atr = tr.ewm(com=window - 1, adjust=False).mean()
+
+    up_move = high.diff()
+    down_move = -(low.diff())
+    dm_plus = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+    dm_minus = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+    safe_atr = atr.replace(0, float("inf"))
+    di_plus = dm_plus.ewm(com=window - 1, adjust=False).mean() / safe_atr * 100
+    di_minus = dm_minus.ewm(com=window - 1, adjust=False).mean() / safe_atr * 100
+    di_sum = (di_plus + di_minus).replace(0, float("inf"))
+    dx = (di_plus - di_minus).abs() / di_sum * 100
+    return dx.ewm(com=window - 1, adjust=False).mean()
+
+
 def atr_stop_distance(
     high: pd.Series, low: pd.Series, close: pd.Series,
     window: int = 14, multiplier: float = 2.0
@@ -81,6 +99,9 @@ def moving_average_signal(
     adx_window: int = 14,
     adx_threshold: float = 20.0,
     min_atr_pct: float = 0.001,
+    adaptive_lookback_bars: int = 0,
+    adx_threshold_percentile: float = 60.0,
+    min_atr_pct_percentile: float = 35.0,
 ) -> str:
     """
     Strategy with Market Regime Filter, RSI Entry Timing, and confirmed crossovers.
@@ -116,16 +137,25 @@ def moving_average_signal(
 
     rsi = _rsi(closes, window=rsi_window)
     _, _, macd_hist = _macd(closes, macd_fast, macd_slow, macd_signal)
-    adx = _adx(highs, lows, closes, adx_window)
+    adx_s = _adx_series(highs, lows, closes, adx_window)
+    adx = float(adx_s.iloc[-1])
     atr = _true_range(highs, lows, closes).ewm(com=adx_window - 1, adjust=False).mean()
-    atr_pct = float(atr.iloc[-1]) / latest_close if latest_close > 0 else 0.0
+    atr_pct_series = (atr / closes.replace(0, float("nan"))).fillna(0.0)
+    atr_pct = float(atr_pct_series.iloc[-1]) if latest_close > 0 else 0.0
 
-    if atr_pct < min_atr_pct:
-        logger.info("REGIME: LOW_VOL (ATR%% %.4f < %.4f) | Skipping.", atr_pct, min_atr_pct)
+    adx_threshold_eff = adx_threshold
+    min_atr_pct_eff = min_atr_pct
+    if adaptive_lookback_bars and adaptive_lookback_bars > 1:
+        lookback = min(int(adaptive_lookback_bars), len(closes))
+        adx_threshold_eff = float(adx_s.tail(lookback).quantile(adx_threshold_percentile / 100.0))
+        min_atr_pct_eff = float(atr_pct_series.tail(lookback).quantile(min_atr_pct_percentile / 100.0))
+
+    if atr_pct < min_atr_pct_eff:
+        logger.info("REGIME: LOW_VOL (ATR%% %.4f < %.4f) | Skipping.", atr_pct, min_atr_pct_eff)
         return "HOLD"
 
-    if adx < adx_threshold:
-        logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold)
+    if adx < adx_threshold_eff:
+        logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold_eff)
         return "HOLD"
 
     trend  = "BULL" if latest_close > curr_trend else "BEAR"
