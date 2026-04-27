@@ -41,6 +41,7 @@ from config import (
     MAX_CONSECUTIVE_ERRORS,
     MAX_GROSS_EXPOSURE_PCT,
     MAX_DAILY_LOSS_PCT,
+    MAX_GROSS_EXPOSURE_PCT,
     MAX_ORDER_ERRORS,
     OPEN_ORDER_STALE_CYCLES,
     ORDER_ERROR_COOLDOWN_SECONDS,
@@ -199,6 +200,8 @@ class DryRunBroker(BaseBroker):
 # ------------------------------------------------------------------
 # Helper functions
 # ------------------------------------------------------------------
+
+
 
 
 def position_size(
