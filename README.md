@@ -312,10 +312,13 @@ Tests run automatically on every push and pull request via GitHub Actions.
 ### Walk-forward validation
 
 ```bash
-python scripts/walk_forward.py --csv historical_data.csv --train-bars 8000 --test-bars 4000
+python scripts/walk_forward.py --csv historical_data.csv --train-bars 8000 --test-bars 4000 --nested-opt
 ```
 
-Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD plus averages.
+Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD, plus
+out-of-sample median PF/Sharpe/MDD and profitable-fold percentage. With
+`--nested-opt`, each fold optimizes parameters on the train slice first, then
+evaluates only on the test slice.
 
 ### Parameter robustness sweep
 
@@ -323,4 +326,5 @@ Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD plus average
 python scripts/sweep_params.py
 ```
 
-Produces `sweep_report.json` with ranked parameter combinations.
+Produces `sweep_report.json` with ranked parameter combinations, including
+latency-stress variants via `BACKTEST_LATENCY_BARS`.
