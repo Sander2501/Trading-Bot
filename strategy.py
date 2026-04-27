@@ -102,15 +102,6 @@ def moving_average_signal(
     adaptive_lookback_bars: int = 0,
     adx_threshold_percentile: float = 60.0,
     min_atr_pct_percentile: float = 35.0,
-    session_filter_enabled: bool = False,
-    session_start_hour_utc: int = 0,
-    session_end_hour_utc: int = 24,
-    atr_accel_window: int = 20,
-    min_atr_accel: float = 0.0,
-    structure_filter_enabled: bool = False,
-    structure_lookback: int = 5,
-    volume_filter_enabled: bool = False,
-    min_volume: float = 0.0,
 ) -> str:
     """
     Strategy with Market Regime Filter, RSI Entry Timing, and confirmed crossovers.
