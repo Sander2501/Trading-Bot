@@ -95,6 +95,14 @@ class BacktestBroker(BaseBroker):
         self._closes: pd.Series = df["c"].astype(float)
         self._highs: pd.Series = df["h"].astype(float) if "h" in df.columns else self._closes.copy()
         self._lows:  pd.Series = df["l"].astype(float) if "l" in df.columns else self._closes.copy()
+        self._raw_df: pd.DataFrame = pd.DataFrame({
+            "h": self._highs.values,
+            "l": self._lows.values,
+            "c": self._closes.values,
+        })
+        if self._timestamps is not None:
+            self._raw_df["t"] = self._timestamps.values
+        self._resample_cache: dict[str, pd.DataFrame] = {}
         self._symbol = symbol
         self._cursor = 0
 
@@ -147,16 +155,90 @@ class BacktestBroker(BaseBroker):
     # ------------------------------------------------------------------
 
     def get_recent_bars(
-        self, symbol: str, limit: int = 30, timeframe: str = "1Min"  # noqa: ARG002
+        self, symbol: str, limit: int = 30, timeframe: str = "1Min"
     ) -> pd.DataFrame:
         self._check_symbol(symbol)
-        end = self._cursor + 1
-        start = max(0, end - limit)
+        if limit <= 0:
+            return pd.DataFrame({"h": [], "l": [], "c": []})
+
+        # If timestamps are unavailable, fall back to cursor slicing.
+        if self._timestamps is None:
+            end = self._cursor + 1
+            start = max(0, end - limit)
+            return pd.DataFrame({
+                "h": self._highs.iloc[start:end].values,
+                "l": self._lows.iloc[start:end].values,
+                "c": self._closes.iloc[start:end].values,
+            })
+
+        tf = timeframe.strip()
+        if tf in {"1Min", "1m"}:
+            end = self._cursor + 1
+            start = max(0, end - limit)
+            return pd.DataFrame({
+                "h": self._highs.iloc[start:end].values,
+                "l": self._lows.iloc[start:end].values,
+                "c": self._closes.iloc[start:end].values,
+            })
+
+        freq = self._to_pandas_freq(tf)
+        if freq is None:
+            end = self._cursor + 1
+            start = max(0, end - limit)
+            return pd.DataFrame({
+                "h": self._highs.iloc[start:end].values,
+                "l": self._lows.iloc[start:end].values,
+                "c": self._closes.iloc[start:end].values,
+            })
+
+        if freq not in self._resample_cache:
+            raw = self._raw_df.copy()
+            raw = raw.dropna(subset=["t"])
+            raw = raw.set_index(pd.to_datetime(raw["t"], utc=True, errors="coerce"))
+            agg = raw.resample(freq).agg({"h": "max", "l": "min", "c": "last"}).dropna()
+            self._resample_cache[freq] = agg
+
+        resampled = self._resample_cache[freq]
+        idx = min(self._cursor, len(self._timestamps) - 1)
+        current_ts = self._timestamps.iloc[idx]
+        if pd.isna(current_ts):
+            end = self._cursor + 1
+            start = max(0, end - limit)
+            return pd.DataFrame({
+                "h": self._highs.iloc[start:end].values,
+                "l": self._lows.iloc[start:end].values,
+                "c": self._closes.iloc[start:end].values,
+            })
+        bars = resampled.loc[resampled.index <= current_ts].tail(limit)
+        if bars.empty:
+            bars = resampled.head(1)
         return pd.DataFrame({
-            "h": self._highs.iloc[start:end].values,
-            "l": self._lows.iloc[start:end].values,
-            "c": self._closes.iloc[start:end].values,
+            "h": bars["h"].values,
+            "l": bars["l"].values,
+            "c": bars["c"].values,
         })
+
+    @staticmethod
+    def _to_pandas_freq(timeframe: str) -> str | None:
+        mapping = {
+            "1Min": "1min",
+            "5Min": "5min",
+            "15Min": "15min",
+            "30Min": "30min",
+            "1H": "1h",
+            "4H": "4h",
+            "1D": "1d",
+            "1W": "1W",
+            "1m": "1min",
+            "5m": "5min",
+            "15m": "15min",
+            "30m": "30min",
+            "1h": "1h",
+            "4h": "4h",
+            "1d": "1d",
+            "1w": "1W",
+        }
+        return mapping.get(timeframe)
 
     # ------------------------------------------------------------------
     # Position queries
@@ -339,8 +421,9 @@ class BacktestBroker(BaseBroker):
         if self._partial_fill_min >= 1:
             return qty
         close = max(self._current_price(), 1e-9)
-        high = float(self._highs.iloc[self._cursor])
-        low = float(self._lows.iloc[self._cursor])
+        idx = min(self._cursor, len(self._highs) - 1)
+        high = float(self._highs.iloc[idx])
+        low = float(self._lows.iloc[idx])
         bar_range_pct = max(0.0, (high - low) / close)
         # Deterministic fill model: fuller fills on higher-vol bars.
         ratio = self._partial_fill_min + (1 - self._partial_fill_min) * min(1.0, bar_range_pct / 0.01)
@@ -392,11 +475,11 @@ class BacktestBroker(BaseBroker):
             sl_hit = self._sl_price is not None and low  <= self._sl_price
             tp_hit = self._tp_price is not None and high >= self._tp_price
             if sl_hit:
-                fill = self._sl_price
+                fill = float(self._sl_price) * (1 - self._effective_slippage())
                 self._close_position_at(fill, qty, "SL_STOP")
                 logger.info("SL triggered on long @ %.4f", fill)
             elif tp_hit:
-                fill = self._tp_price
+                fill = float(self._tp_price) * (1 - self._effective_slippage())
                 self._close_position_at(fill, qty, "TP_STOP")
                 logger.info("TP triggered on long @ %.4f", fill)
 
@@ -404,11 +487,11 @@ class BacktestBroker(BaseBroker):
             sl_hit = self._sl_price is not None and high >= self._sl_price
             tp_hit = self._tp_price is not None and low  <= self._tp_price
             if sl_hit:
-                fill = self._sl_price
+                fill = float(self._sl_price) * (1 + self._effective_slippage())
                 self._cover_position_at(fill, qty, "SL_STOP")
                 logger.info("SL triggered on short @ %.4f", fill)
             elif tp_hit:
-                fill = self._tp_price
+                fill = float(self._tp_price) * (1 + self._effective_slippage())
                 self._cover_position_at(fill, qty, "TP_STOP")
                 logger.info("TP triggered on short @ %.4f", fill)
 

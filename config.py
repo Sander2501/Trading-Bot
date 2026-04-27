@@ -61,6 +61,24 @@ ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "25.0"))
 #: to cover spread/fees; helps reduce overtrading in micro-chop regimes.
 MIN_ATR_PCT: float = float(os.getenv("MIN_ATR_PCT", "0.001"))
 
+#: Enable adaptive percentile-based thresholds for ADX and ATR%.
+ADAPTIVE_THRESHOLDS_ENABLED: bool = os.getenv("ADAPTIVE_THRESHOLDS_ENABLED", "false").lower() in {"1", "true", "yes"}
+#: Lookback horizon (in days) used to compute adaptive ADX/ATR% percentiles.
+ADAPTIVE_LOOKBACK_DAYS: int = int(os.getenv("ADAPTIVE_LOOKBACK_DAYS", "60"))
+#: Percentile of recent ADX values used as dynamic trend-strength threshold.
+ADAPTIVE_ADX_PERCENTILE: float = float(os.getenv("ADAPTIVE_ADX_PERCENTILE", "60.0"))
+#: Percentile of recent ATR% values used as dynamic low-volatility floor.
+ADAPTIVE_ATR_PERCENTILE: float = float(os.getenv("ADAPTIVE_ATR_PERCENTILE", "35.0"))
+SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+SESSION_START_HOUR_UTC: int = int(os.getenv("SESSION_START_HOUR_UTC", "7"))
+SESSION_END_HOUR_UTC: int = int(os.getenv("SESSION_END_HOUR_UTC", "22"))
+ATR_ACCEL_WINDOW: int = int(os.getenv("ATR_ACCEL_WINDOW", "20"))
+MIN_ATR_ACCEL: float = float(os.getenv("MIN_ATR_ACCEL", "0.0"))
+STRUCTURE_FILTER_ENABLED: bool = os.getenv("STRUCTURE_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+STRUCTURE_LOOKBACK: int = int(os.getenv("STRUCTURE_LOOKBACK", "5"))
+VOLUME_FILTER_ENABLED: bool = os.getenv("VOLUME_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+MIN_VOLUME: float = float(os.getenv("MIN_VOLUME", "0.0"))
+
 #: Allow opening short positions from flat on SELL signals.  Default is False
 #: because the strategy's short leg has historically been a net loser on BTC.
 #: Long-exit (closing an existing long on a SELL signal) is unaffected by this.
@@ -102,6 +120,22 @@ TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "4.0"))
 #: Target profit as a fraction of entry price (floor for high-conviction trades).
 TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
 
+#: Minimum expected reward/risk ratio after estimated costs to allow a new entry.
+MIN_EXPECTED_RR: float = float(os.getenv("MIN_EXPECTED_RR", "1.20"))
+#: Estimated round-trip execution cost as fraction of notional (spread+slippage+fees).
+ESTIMATED_ROUND_TRIP_COST_PCT: float = float(os.getenv("ESTIMATED_ROUND_TRIP_COST_PCT", "0.0015"))
+
+#: Promote stop to break-even once unrealized PnL reaches this R multiple.
+BREAK_EVEN_R_MULT: float = float(os.getenv("BREAK_EVEN_R_MULT", "1.0"))
+#: Take partial profits at this R multiple (fraction configured below).
+PARTIAL_TP1_R: float = float(os.getenv("PARTIAL_TP1_R", "1.5"))
+#: Fraction of open size to close at PARTIAL_TP1_R.
+PARTIAL_TP1_FRACTION: float = float(os.getenv("PARTIAL_TP1_FRACTION", "0.50"))
+#: Optional second partial take-profit R multiple.
+PARTIAL_TP2_R: float = float(os.getenv("PARTIAL_TP2_R", "2.0"))
+#: Fraction of open size to close at PARTIAL_TP2_R.
+PARTIAL_TP2_FRACTION: float = float(os.getenv("PARTIAL_TP2_FRACTION", "0.50"))
+
 #: Halt trading for the day once intraday drawdown exceeds this threshold.
 MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.03"))
 
@@ -122,6 +156,7 @@ BACKTEST_LATENCY_BARS: int = int(os.getenv("BACKTEST_LATENCY_BARS", "0"))
 #: Minimum fraction of requested quantity filled in backtests.
 #: 1.0 means full fills (legacy behaviour); lower values simulate partial fills.
 BACKTEST_PARTIAL_FILL_MIN: float = float(os.getenv("BACKTEST_PARTIAL_FILL_MIN", "1.0"))
+MIN_EVAL_TRADES: int = int(os.getenv("MIN_EVAL_TRADES", "100"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 #: Seconds to sleep between each ``run_once`` cycle.
@@ -189,6 +224,28 @@ def validate_config() -> None:
         raise ValueError(
             f"MIN_ATR_PCT ({MIN_ATR_PCT}) must be in [0, 1)"
         )
+    if ADAPTIVE_LOOKBACK_DAYS <= 0:
+        raise ValueError(f"ADAPTIVE_LOOKBACK_DAYS ({ADAPTIVE_LOOKBACK_DAYS}) must be > 0")
+    if not (0 < ADAPTIVE_ADX_PERCENTILE < 100):
+        raise ValueError(
+            f"ADAPTIVE_ADX_PERCENTILE ({ADAPTIVE_ADX_PERCENTILE}) must be in (0, 100)"
+        )
+    if not (0 < ADAPTIVE_ATR_PERCENTILE < 100):
+        raise ValueError(
+            f"ADAPTIVE_ATR_PERCENTILE ({ADAPTIVE_ATR_PERCENTILE}) must be in (0, 100)"
+        )
+    if not (0 <= SESSION_START_HOUR_UTC <= 23 and 1 <= SESSION_END_HOUR_UTC <= 24):
+        raise ValueError("SESSION_START_HOUR_UTC/SESSION_END_HOUR_UTC must be valid UTC hours")
+    if SESSION_START_HOUR_UTC >= SESSION_END_HOUR_UTC:
+        raise ValueError("SESSION_START_HOUR_UTC must be < SESSION_END_HOUR_UTC")
+    if ATR_ACCEL_WINDOW <= 1:
+        raise ValueError(f"ATR_ACCEL_WINDOW ({ATR_ACCEL_WINDOW}) must be > 1")
+    if MIN_ATR_ACCEL < 0:
+        raise ValueError(f"MIN_ATR_ACCEL ({MIN_ATR_ACCEL}) must be >= 0")
+    if STRUCTURE_LOOKBACK < 2:
+        raise ValueError(f"STRUCTURE_LOOKBACK ({STRUCTURE_LOOKBACK}) must be >= 2")
+    if MIN_VOLUME < 0:
+        raise ValueError(f"MIN_VOLUME ({MIN_VOLUME}) must be >= 0")
     if not (0 < RISK_PER_TRADE <= 0.10):
         raise ValueError(
             f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 0.10] "
@@ -204,6 +261,24 @@ def validate_config() -> None:
         raise ValueError(f"TAKE_PROFIT_PCT ({TAKE_PROFIT_PCT}) must be >= 0")
     if TAKE_PROFIT_MULT <= 0:
         raise ValueError(f"TAKE_PROFIT_MULT ({TAKE_PROFIT_MULT}) must be > 0")
+    if MIN_EXPECTED_RR <= 0:
+        raise ValueError(f"MIN_EXPECTED_RR ({MIN_EXPECTED_RR}) must be > 0")
+    if ESTIMATED_ROUND_TRIP_COST_PCT < 0:
+        raise ValueError(
+            f"ESTIMATED_ROUND_TRIP_COST_PCT ({ESTIMATED_ROUND_TRIP_COST_PCT}) must be >= 0"
+        )
+    if BREAK_EVEN_R_MULT <= 0:
+        raise ValueError(f"BREAK_EVEN_R_MULT ({BREAK_EVEN_R_MULT}) must be > 0")
+    if PARTIAL_TP1_R <= 0 or PARTIAL_TP2_R <= 0:
+        raise ValueError("PARTIAL_TP1_R and PARTIAL_TP2_R must be > 0")
+    if not (0 < PARTIAL_TP1_FRACTION <= 1):
+        raise ValueError(
+            f"PARTIAL_TP1_FRACTION ({PARTIAL_TP1_FRACTION}) must be in (0, 1]"
+        )
+    if not (0 < PARTIAL_TP2_FRACTION <= 1):
+        raise ValueError(
+            f"PARTIAL_TP2_FRACTION ({PARTIAL_TP2_FRACTION}) must be in (0, 1]"
+        )
     if ATR_STOP_MULT <= 0:
         raise ValueError(f"ATR_STOP_MULT ({ATR_STOP_MULT}) must be > 0")
     if STARTING_CASH <= 0:
@@ -220,6 +295,8 @@ def validate_config() -> None:
         raise ValueError(
             f"BACKTEST_PARTIAL_FILL_MIN ({BACKTEST_PARTIAL_FILL_MIN}) must be in (0, 1]"
         )
+    if MIN_EVAL_TRADES < 1:
+        raise ValueError(f"MIN_EVAL_TRADES ({MIN_EVAL_TRADES}) must be >= 1")
     if not (0 < MAX_GROSS_EXPOSURE_PCT <= 1):
         raise ValueError(
             f"MAX_GROSS_EXPOSURE_PCT ({MAX_GROSS_EXPOSURE_PCT}) must be in (0, 1]"

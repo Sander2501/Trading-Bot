@@ -115,6 +115,9 @@ python run_backtest.py
 Replays `historical_data.csv` and prints a performance report:
 
 ```
+
+If your CSV is 1-minute data and `TIMEFRAME` is set higher (e.g. `15Min`),
+the backtest broker will resample OHLC internally to the requested timeframe.
 ========================================
        BACKTEST PERFORMANCE
 ========================================
@@ -131,8 +134,6 @@ Avg Loss         :      $-83.20
 Total Fills      :           48
 ========================================
 ```
-
-The report is also saved to `backtest_report.json` for further analysis.
 
 ### Live / Demo Trading
 
@@ -201,13 +202,10 @@ Run → analyze report → adjust → re-run:
 # 1. Run baseline backtest
 python run_backtest.py
 
-# 2. Review backtest_report.json
-cat backtest_report.json
-
-# 3. Adjust parameters in .env (e.g. tighten stop)
+# 2. Adjust parameters in .env (e.g. tighten stop)
 echo "ATR_STOP_MULT=1.5" >> .env
 
-# 4. Re-run and compare
+# 3. Re-run and compare
 python run_backtest.py
 ```
 
@@ -280,6 +278,7 @@ pytest -q
 | `Could not open requirements file: requirements.txt` | `cd` into the repo root first (the folder containing `requirements.txt`) and retry |
 | `Missing CAPITAL_API_KEY` | Create `.env` from `.env.example` and fill credentials |
 | `FileNotFoundError: historical_data.csv` | Provide a CSV with at least a `c` (close) column |
+| Backtest shows zero/too-few trades with short history | Fetch a longer dataset (e.g. `python scripts/fetch_history.py --years 2 --interval 1m --out historical_data.csv`) |
 | Signal stays `HOLD` forever | ADX may be low (choppy market). Lower `ADX_THRESHOLD` or wait for a trending period |
 | `ValueError: RISK_PER_TRADE … must be in (0, 0.10]` | Reduce `RISK_PER_TRADE` in `.env` to 0.02 or less |
 | Tests fail on collection | Run `pip install -r requirements.txt` to install `pytest` |
@@ -317,10 +316,13 @@ Tests run automatically on every push and pull request via GitHub Actions.
 ### Walk-forward validation
 
 ```bash
-python scripts/walk_forward.py --csv historical_data.csv --train-bars 8000 --test-bars 4000
+python scripts/walk_forward.py --csv historical_data.csv --train-bars 8000 --test-bars 4000 --nested-opt
 ```
 
-Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD plus averages.
+Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD, plus
+out-of-sample median PF/Sharpe/MDD and profitable-fold percentage. With
+`--nested-opt`, each fold optimizes parameters on the train slice first, then
+evaluates only on the test slice.
 
 ### Parameter robustness sweep
 
@@ -328,4 +330,5 @@ Produces `walk_forward_report.json` with per-fold ROI/PF/Sharpe/MDD plus average
 python scripts/sweep_params.py
 ```
 
-Produces `sweep_report.json` with ranked parameter combinations.
+Produces `sweep_report.json` with ranked parameter combinations, including
+latency-stress variants via `BACKTEST_LATENCY_BARS`.
