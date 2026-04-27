@@ -24,9 +24,6 @@ SYMBOL: str = os.getenv("SYMBOL", "BTC/USD")
 TIMEFRAME: str = os.getenv("TIMEFRAME", "15Min")
 
 # ── Strategy: triple EMA + MACD + ADX + RSI ──────────────────────────────────
-#: Legacy single-MA window (unused by current strategy; kept for compat).
-WINDOW: int = int(os.getenv("WINDOW", "20"))
-
 #: Bars the EMA crossover must persist before a signal fires.
 #: 2 reduces whipsaws on noisy 1-minute BTC data vs the old default of 1.
 CONFIRM_BARS: int = int(os.getenv("CONFIRM_BARS", "2"))
@@ -173,6 +170,25 @@ ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
 
 #: Warn when open working orders persist for this many consecutive cycles.
 OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
+
+# ── Filters ───────────────────────────────────────────────────────────────────
+#: Enable session-hour-based filter (suppress signals outside trading hours).
+SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+#: Start of trading session in UTC hours (0-23).
+SESSION_START_HOUR_UTC: int = int(os.getenv("SESSION_START_HOUR_UTC", "0"))
+
+#: End of trading session in UTC hours (0-23).
+SESSION_END_HOUR_UTC: int = int(os.getenv("SESSION_END_HOUR_UTC", "23"))
+
+#: Enable volume-based filter (suppress signals on low volume bars).
+VOLUME_FILTER_ENABLED: bool = os.getenv("VOLUME_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+#: Enable price structure filter (suppress counter-trend entries).
+STRUCTURE_FILTER_ENABLED: bool = os.getenv("STRUCTURE_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+
+#: Lookback bars for structure analysis (higher lows/lower highs detection).
+STRUCTURE_LOOKBACK: int = int(os.getenv("STRUCTURE_LOOKBACK", "20"))
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 #: Path to the CSV file used by BacktestBroker.
