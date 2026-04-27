@@ -86,8 +86,9 @@ def main() -> None:
     folds: list[dict] = []
     start = 0
     fold_id = 0
-    while fold_id < args.max_folds and start + args.train-bars + args.test-bars <= len(df):
-        test_start = start + args.train-bars
+    while fold_id < args.max_folds and start + args.train-bars + args.embargo_bars + args.test-bars <= len(df):
+        train_end = start + args.train-bars
+        test_start = train_end + args.embargo_bars
         test_end = test_start + args.test-bars
         train_df = df.iloc[start:test_start].copy()
         test_df = df.iloc[test_start:test_end].copy()
@@ -114,7 +115,7 @@ def main() -> None:
         folds.append({
             "fold": fold_id,
             "train_start": start,
-            "train_end": test_start,
+            "train_end": train_end,
             "test_start": test_start,
             "test_end": test_end,
             "nested_opt": bool(args.nested_opt),

@@ -56,9 +56,40 @@ def main() -> None:
                 if hasattr(bot_main, k):
                     setattr(bot_main, k, parsed)
             _, m = run_backtest_for_csv(CSV_PATH)
-            row = {"params": dict(zip(keys, values)), "metrics": m, "score": _score(m)}
+            stress_matrix = {}
+            for label, stress in {
+                "base": {},
+                "high_slippage": {"SLIPPAGE_PCT": "0.0010", "BACKTEST_DYNAMIC_SLIPPAGE_K": "0.5"},
+                "latency_1": {"BACKTEST_LATENCY_BARS": "1"},
+                "partial_fill_80": {"BACKTEST_PARTIAL_FILL_MIN": "0.8"},
+            }.items():
+                old_stress = {k: getattr(config, k) for k in stress}
+                try:
+                    for k, sv in stress.items():
+                        parsed_sv = float(sv) if "." in sv else int(sv)
+                        setattr(config, k, parsed_sv)
+                        if hasattr(bot_main, k):
+                            setattr(bot_main, k, parsed_sv)
+                    _, m_stress = run_backtest_for_csv(CSV_PATH)
+                    stress_matrix[label] = m_stress
+                finally:
+                    for k, ov in old_stress.items():
+                        setattr(config, k, ov)
+                        if hasattr(bot_main, k):
+                            setattr(bot_main, k, ov)
+            matrix_pass = all(float(v.get("roi_pct", 0.0)) > 0 for v in stress_matrix.values())
+            row = {
+                "params": dict(zip(keys, values)),
+                "metrics": m,
+                "score": _score(m),
+                "stress_matrix": stress_matrix,
+                "stress_matrix_pass": matrix_pass,
+            }
             rows.append(row)
-            print(f"{row['score']:.2f} | {row['params']} | roi={m['roi_pct']:.2f}% pf={m['profit_factor']:.2f}")
+            print(
+                f"{row['score']:.2f} | pass={matrix_pass} | {row['params']} "
+                f"| roi={m['roi_pct']:.2f}% pf={m['profit_factor']:.2f}"
+            )
         finally:
             for k, v in old.items():
                 if v is None:
@@ -70,7 +101,7 @@ def main() -> None:
             for k, v in old_main.items():
                 setattr(bot_main, k, v)
 
-    rows.sort(key=lambda r: r["score"], reverse=True)
+    rows.sort(key=lambda r: (r["stress_matrix_pass"], r["score"]), reverse=True)
     report = {"top_10": rows[:10], "all_results_count": len(rows)}
     Path("sweep_report.json").write_text(json.dumps(report, indent=2))
     print("Saved sweep_report.json")

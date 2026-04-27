@@ -34,6 +34,7 @@ from config import (
     ADAPTIVE_THRESHOLDS_ENABLED,
     BREAK_EVEN_R_MULT,
     CHECK_INTERVAL_SECONDS,
+    COMMISSION_PER_TRADE,
     CONFIRM_BARS,
     ERROR_COOLDOWN_SECONDS,
     FAST_WINDOW,
@@ -55,10 +56,15 @@ from config import (
     RSI_OVERSOLD,
     RSI_WINDOW,
     RISK_PER_TRADE,
+    SESSION_END_HOUR_UTC,
+    SESSION_FILTER_ENABLED,
+    SESSION_START_HOUR_UTC,
     SLIPPAGE_PCT,
     SLOW_WINDOW,
     STATE_FILE,
     STOP_LOSS_PCT,
+    STRUCTURE_FILTER_ENABLED,
+    STRUCTURE_LOOKBACK,
     TAKE_PROFIT_MULT,
     PARTIAL_TP1_FRACTION,
     PARTIAL_TP1_R,
@@ -68,6 +74,7 @@ from config import (
     SYMBOL,
     TIMEFRAME,
     TREND_WINDOW,
+    VOLUME_FILTER_ENABLED,
 )
 from strategy import atr_stop_distance, moving_average_signal
 
@@ -577,6 +584,66 @@ def run_once(
                 if sleep_enabled:
                     time.sleep(CHECK_INTERVAL_SECONDS)
                 return
+
+            # Priority order: stop > partial > TP (TP did not trigger above).
+            if current_qty > 0:
+                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
+                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
+                if p1_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp1 long",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp1_taken = True
+                            state.log_event(state.cycles, "PARTIAL_TP1_LONG", {"qty": qty_to_close, "price": latest_price})
+                            logger.info("PARTIAL TP1 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+                if p2_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_sell(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp2 long",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp2_taken = True
+                            state.log_event(state.cycles, "PARTIAL_TP2_LONG", {"qty": qty_to_close, "price": latest_price})
+                            logger.info("PARTIAL TP2 LONG: closed %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+            else:
+                p1_trigger = (not state.partial_tp1_taken) and r_multiple >= PARTIAL_TP1_R
+                p2_trigger = (not state.partial_tp2_taken) and r_multiple >= PARTIAL_TP2_R
+                if p1_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP1_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp1 short",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp1_taken = True
+                            state.log_event(state.cycles, "PARTIAL_TP1_SHORT", {"qty": qty_to_close, "price": latest_price})
+                            logger.info("PARTIAL TP1 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
+                if p2_trigger:
+                    qty_to_close = round(max(0.0, abs(current_qty) * PARTIAL_TP2_FRACTION), 6)
+                    if 0 < qty_to_close < abs(current_qty):
+                        if _submit_with_guard(
+                            lambda: broker.submit_buy(SYMBOL, qty_to_close),
+                            state,
+                            "partial tp2 short",
+                            sleep_enabled,
+                        ):
+                            state.partial_tp2_taken = True
+                            state.log_event(state.cycles, "PARTIAL_TP2_SHORT", {"qty": qty_to_close, "price": latest_price})
+                            logger.info("PARTIAL TP2 SHORT: covered %.6f @ ~%.2f", qty_to_close, latest_price)
+                            return
 
     # --- Signal execution ---
     qty = position_size(equity, buying_power, stop_dist, latest_price)

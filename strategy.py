@@ -120,6 +120,8 @@ def moving_average_signal(
     closes = bars["c"]
     highs  = bars["h"]
     lows   = bars["l"]
+    ts = bars.get("t")
+    vols = bars.get("v")
 
     # Need confirm_bars + 1 extra to check the bar before the crossover
     min_bars = max(trend_window, macd_slow, rsi_window) + confirm_bars + 5
@@ -158,8 +160,42 @@ def moving_average_signal(
         logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold_eff)
         return "HOLD"
 
+    if session_filter_enabled and ts is not None:
+        try:
+            hour = pd.to_datetime(ts.iloc[-1], utc=True).hour
+            if not (session_start_hour_utc <= hour < session_end_hour_utc):
+                logger.info(
+                    "REGIME: OUT_OF_SESSION (hour=%d, allowed=[%d,%d)) | Skipping.",
+                    hour,
+                    session_start_hour_utc,
+                    session_end_hour_utc,
+                )
+                return "HOLD"
+        except Exception:
+            pass
+
+    if atr_accel_window > 1 and min_atr_accel > 0:
+        atr_baseline = float(atr_pct_series.tail(atr_accel_window).mean())
+        atr_accel = (atr_pct / atr_baseline) if atr_baseline > 0 else 0.0
+        if atr_accel < min_atr_accel:
+            logger.info(
+                "REGIME: LOW_ATR_ACCEL (%.3f < %.3f) | Skipping.",
+                atr_accel,
+                min_atr_accel,
+            )
+            return "HOLD"
+
+    if volume_filter_enabled and vols is not None:
+        try:
+            latest_vol = float(vols.iloc[-1])
+            if latest_vol < min_volume:
+                logger.info("REGIME: LOW_VOLUME (%.2f < %.2f) | Skipping.", latest_vol, min_volume)
+                return "HOLD"
+        except Exception:
+            pass
+
     trend  = "BULL" if latest_close > curr_trend else "BEAR"
-    regime = "TRENDING" if adx > 25 else "RANGING"
+    regime = "TRENDING" if adx > adx_threshold_eff else "RANGING"
 
     logger.info(
         "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f atr%%=%.3f",
@@ -184,16 +220,25 @@ def moving_average_signal(
         was_above = float(fast_ema.iloc[-(confirm_bars + 1)]) >= float(slow_ema.iloc[-(confirm_bars + 1)])
         return held and was_above
 
+    if structure_filter_enabled and len(highs) >= structure_lookback + 1:
+        recent_highs = highs.tail(structure_lookback + 1)
+        recent_lows = lows.tail(structure_lookback + 1)
+        bull_structure = bool(recent_highs.iloc[-1] > recent_highs.iloc[0] and recent_lows.iloc[-1] > recent_lows.iloc[0])
+        bear_structure = bool(recent_highs.iloc[-1] < recent_highs.iloc[0] and recent_lows.iloc[-1] < recent_lows.iloc[0])
+    else:
+        bull_structure = True
+        bear_structure = True
+
     if trend == "BULL":
         is_ema_bull  = curr_fast > curr_slow
         is_macd_bull = macd_hist > 0
         is_rsi_dip   = rsi < 45
 
         if regime == "TRENDING":
-            if is_ema_bull and is_macd_bull and is_rsi_dip:
+            if is_ema_bull and is_macd_bull and is_rsi_dip and bull_structure:
                 logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Dip)")
                 return "BUY"
-            if _bull_crossover_confirmed():
+            if _bull_crossover_confirmed() and bull_structure:
                 logger.info("SIGNAL: CONFIRMED CROSSOVER BUY (%d bars)", confirm_bars)
                 return "BUY"
         else:
@@ -207,10 +252,10 @@ def moving_average_signal(
         is_rsi_spike = rsi > 55
 
         if regime == "TRENDING":
-            if is_ema_bear and is_macd_bear and is_rsi_spike:
+            if is_ema_bear and is_macd_bear and is_rsi_spike and bear_structure:
                 logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Spike)")
                 return "SELL"
-            if _bear_crossover_confirmed():
+            if _bear_crossover_confirmed() and bear_structure:
                 logger.info("SIGNAL: CONFIRMED CROSSOVER SELL (%d bars)", confirm_bars)
                 return "SELL"
         else:

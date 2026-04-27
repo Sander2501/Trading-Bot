@@ -147,6 +147,7 @@ BACKTEST_LATENCY_BARS: int = int(os.getenv("BACKTEST_LATENCY_BARS", "0"))
 #: Minimum fraction of requested quantity filled in backtests.
 #: 1.0 means full fills (legacy behaviour); lower values simulate partial fills.
 BACKTEST_PARTIAL_FILL_MIN: float = float(os.getenv("BACKTEST_PARTIAL_FILL_MIN", "1.0"))
+MIN_EVAL_TRADES: int = int(os.getenv("MIN_EVAL_TRADES", "100"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 #: Seconds to sleep between each ``run_once`` cycle.
@@ -273,6 +274,8 @@ def validate_config() -> None:
         raise ValueError(
             f"BACKTEST_PARTIAL_FILL_MIN ({BACKTEST_PARTIAL_FILL_MIN}) must be in (0, 1]"
         )
+    if MIN_EVAL_TRADES < 1:
+        raise ValueError(f"MIN_EVAL_TRADES ({MIN_EVAL_TRADES}) must be >= 1")
     if not (0 < MAX_GROSS_EXPOSURE_PCT <= 1):
         raise ValueError(
             f"MAX_GROSS_EXPOSURE_PCT ({MAX_GROSS_EXPOSURE_PCT}) must be in (0, 1]"
