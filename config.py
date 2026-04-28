@@ -50,9 +50,14 @@ MACD_SIGNAL_WINDOW: int = int(os.getenv("MACD_SIGNAL_WINDOW", "9"))
 #: ADX trend-strength filter.  Signals are suppressed when ADX < threshold,
 #: which eliminates most false crossovers in sideways/choppy markets.
 ADX_WINDOW: int = int(os.getenv("ADX_WINDOW", "14"))
-#: Raised to 25 to suppress crossover signals during sideways/chop regimes.
-#: 20 let too many low-trend-strength setups through in 30-day backtests.
-ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "25.0"))
+#: Minimum ADX to consider the market active at all.  Below this the regime is
+#: SIDEWAYS and no signal fires.  Between this and ADX_TRENDING_THRESHOLD the
+#: regime is RANGING (RSI mean-reversion entries).
+ADX_THRESHOLD: float = float(os.getenv("ADX_THRESHOLD", "20.0"))
+#: ADX above this level is considered TRENDING (EMA crossover + MACD entries).
+#: Must be >= ADX_THRESHOLD.  Lowered from the old combined 25 threshold so
+#: the RANGING band (20–25) is now reachable and RSI mean-reversion can fire.
+ADX_TRENDING_THRESHOLD: float = float(os.getenv("ADX_TRENDING_THRESHOLD", "25.0"))
 
 #: Volatility floor (ATR / price). Suppress new signals when volatility is too low
 #: to cover spread/fees; helps reduce overtrading in micro-chop regimes.
@@ -76,10 +81,10 @@ STRUCTURE_LOOKBACK: int = int(os.getenv("STRUCTURE_LOOKBACK", "5"))
 VOLUME_FILTER_ENABLED: bool = os.getenv("VOLUME_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
 MIN_VOLUME: float = float(os.getenv("MIN_VOLUME", "0.0"))
 
-#: Allow opening short positions from flat on SELL signals.  Default is False
-#: because the strategy's short leg has historically been a net loser on BTC.
-#: Long-exit (closing an existing long on a SELL signal) is unaffected by this.
-ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "false").lower() in {"1", "true", "yes"}
+#: Allow opening short positions from flat on SELL signals.  Enabled by default
+#: so the strategy participates in both bull and bear legs.  Set to false to
+#: restrict the bot to long-only trading.
+ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "true").lower() in {"1", "true", "yes"}
 
 # ── Risk management ───────────────────────────────────────────────────────────
 # Risk profiles (set RISK_PER_TRADE env var to select):
@@ -118,20 +123,26 @@ TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "4.0"))
 TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
 
 #: Minimum expected reward/risk ratio after estimated costs to allow a new entry.
-MIN_EXPECTED_RR: float = float(os.getenv("MIN_EXPECTED_RR", "1.20"))
+#: Raised to 1.5 to ensure only high-quality setups are taken.  Values below 1.0
+#: allow negative-expectancy entries and must be avoided.
+MIN_EXPECTED_RR: float = float(os.getenv("MIN_EXPECTED_RR", "1.5"))
 #: Estimated round-trip execution cost as fraction of notional (spread+slippage+fees).
 ESTIMATED_ROUND_TRIP_COST_PCT: float = float(os.getenv("ESTIMATED_ROUND_TRIP_COST_PCT", "0.0015"))
 
 #: Promote stop to break-even once unrealized PnL reaches this R multiple.
 BREAK_EVEN_R_MULT: float = float(os.getenv("BREAK_EVEN_R_MULT", "1.0"))
 #: Take partial profits at this R multiple (fraction configured below).
-PARTIAL_TP1_R: float = float(os.getenv("PARTIAL_TP1_R", "1.5"))
+#: Raised from 1.5→2.0 so winners have room to breathe before the first trim.
+PARTIAL_TP1_R: float = float(os.getenv("PARTIAL_TP1_R", "2.0"))
 #: Fraction of open size to close at PARTIAL_TP1_R.
-PARTIAL_TP1_FRACTION: float = float(os.getenv("PARTIAL_TP1_FRACTION", "0.50"))
+#: Lowered from 50%→25% so the majority of the position continues to the full target.
+PARTIAL_TP1_FRACTION: float = float(os.getenv("PARTIAL_TP1_FRACTION", "0.25"))
 #: Optional second partial take-profit R multiple.
-PARTIAL_TP2_R: float = float(os.getenv("PARTIAL_TP2_R", "2.0"))
+#: Raised from 2.0→3.0 to let more profit run before the second trim.
+PARTIAL_TP2_R: float = float(os.getenv("PARTIAL_TP2_R", "3.0"))
 #: Fraction of open size to close at PARTIAL_TP2_R.
-PARTIAL_TP2_FRACTION: float = float(os.getenv("PARTIAL_TP2_FRACTION", "0.50"))
+#: Lowered from 50%→25% of remaining so ~56% of position reaches the full 4R target.
+PARTIAL_TP2_FRACTION: float = float(os.getenv("PARTIAL_TP2_FRACTION", "0.25"))
 
 #: Halt trading for the day once intraday drawdown exceeds this threshold.
 MAX_DAILY_LOSS_PCT: float = float(os.getenv("MAX_DAILY_LOSS_PCT", "0.03"))

@@ -24,6 +24,7 @@ from pathlib import Path
 from brokers import CapitalBroker, BaseBroker
 from config import (
     ADX_THRESHOLD,
+    ADX_TRENDING_THRESHOLD,
     ADX_WINDOW,
     ALLOW_SHORTS,
     ATR_STOP_MULT,
@@ -595,6 +596,7 @@ def run_once(
         macd_signal=MACD_SIGNAL_WINDOW,
         adx_window=ADX_WINDOW,
         adx_threshold=ADX_THRESHOLD,
+        adx_trending_threshold=ADX_TRENDING_THRESHOLD,
         min_atr_pct=MIN_ATR_PCT,
         adaptive_lookback_bars=adaptive_lookback_bars,
         adx_threshold_percentile=ADAPTIVE_ADX_PERCENTILE,

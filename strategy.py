@@ -15,8 +15,10 @@ def _rsi(series: pd.Series, window: int = 14) -> float:
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=window - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=window - 1, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, float("inf"))
-    return float((100 - (100 / (1 + rs))).iloc[-1])
+    # Replace zero avg_loss with NaN then fill with inf so that rs = avg_gain/0
+    # yields inf (not 0), giving RSI = 100 for all-gain series.
+    rs = avg_gain / avg_loss.replace(0, float("nan"))
+    return float((100 - (100 / (1 + rs.fillna(float("inf"))))).iloc[-1])
 
 
 def _macd(
@@ -98,6 +100,7 @@ def moving_average_signal(
     macd_signal: int = 9,
     adx_window: int = 14,
     adx_threshold: float = 20.0,
+    adx_trending_threshold: float = 25.0,
     min_atr_pct: float = 0.001,
     adaptive_lookback_bars: int = 0,
     adx_threshold_percentile: float = 60.0,
@@ -116,9 +119,12 @@ def moving_average_signal(
     Strategy with Market Regime Filter, RSI Entry Timing, and confirmed crossovers.
 
     Regimes:
-    1. TRENDING (ADX > 25): Follow EMA crossovers with MACD + RSI confirmation.
-    2. RANGING (ADX 20-25): Use RSI mean-reversion within the trend.
-    3. SIDEWAYS (ADX < threshold): Stay flat.
+    1. TRENDING (ADX >= adx_trending_threshold): Follow EMA crossovers with MACD + RSI
+       confirmation.  RSI must be above 50 (bull) or below 50 (bear) to confirm that
+       momentum direction agrees with the EMA/MACD alignment.
+    2. RANGING (adx_threshold <= ADX < adx_trending_threshold): Use RSI mean-reversion
+       against the trend (oversold for longs, overbought for shorts).
+    3. SIDEWAYS (ADX < adx_threshold): Stay flat — no signal.
 
     ``confirm_bars`` controls how many consecutive bars the fast/slow EMA
     crossover must have been in place before a signal fires.  A value of 2
@@ -165,7 +171,19 @@ def moving_average_signal(
         logger.info("REGIME: LOW_VOL (ATR%% %.4f < %.4f) | Skipping.", atr_pct, min_atr_pct_eff)
         return "HOLD"
 
-    if adx < adx_threshold_eff:
+    # Determine regime before the early-return guard so the RANGING band is
+    # reachable.  Ensure the trending boundary is never lower than the ranging
+    # boundary (important when adaptive mode raises adx_threshold_eff).
+    adx_trending_eff = max(adx_trending_threshold, adx_threshold_eff)
+    trend  = "BULL" if latest_close > curr_trend else "BEAR"
+    if adx >= adx_trending_eff:
+        regime = "TRENDING"
+    elif adx >= adx_threshold_eff:
+        regime = "RANGING"
+    else:
+        regime = "SIDEWAYS"
+
+    if regime == "SIDEWAYS":
         logger.info("REGIME: SIDEWAYS (ADX %.1f < %.1f) | Skipping.", adx, adx_threshold_eff)
         return "HOLD"
 
@@ -203,9 +221,6 @@ def moving_average_signal(
         except Exception:
             pass
 
-    trend  = "BULL" if latest_close > curr_trend else "BEAR"
-    regime = "TRENDING" if adx > adx_threshold_eff else "RANGING"
-
     logger.info(
         "REGIME: %s (%s) | fast=%.2f slow=%.2f trend=%.2f | rsi=%.1f macd_hist=%.2f adx=%.1f atr%%=%.3f",
         regime, trend, curr_fast, curr_slow, curr_trend, rsi, macd_hist, adx, atr_pct * 100,
@@ -241,11 +256,11 @@ def moving_average_signal(
     if trend == "BULL":
         is_ema_bull  = curr_fast > curr_slow
         is_macd_bull = macd_hist > 0
-        is_rsi_dip   = rsi < 45
+        is_rsi_bull  = rsi > 50  # momentum confirms direction (was: rsi < 45 — contradicted MACD bull)
 
         if regime == "TRENDING":
-            if is_ema_bull and is_macd_bull and is_rsi_dip and bull_structure:
-                logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Dip)")
+            if is_ema_bull and is_macd_bull and is_rsi_bull and bull_structure:
+                logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Bull)")
                 return "BUY"
             if _bull_crossover_confirmed() and bull_structure:
                 logger.info("SIGNAL: CONFIRMED CROSSOVER BUY (%d bars)", confirm_bars)
@@ -258,11 +273,11 @@ def moving_average_signal(
     elif trend == "BEAR":
         is_ema_bear  = curr_fast < curr_slow
         is_macd_bear = macd_hist < 0
-        is_rsi_spike = rsi > 55
+        is_rsi_bear  = rsi < 50  # momentum confirms direction (was: rsi > 55 — contradicted MACD bear)
 
         if regime == "TRENDING":
-            if is_ema_bear and is_macd_bear and is_rsi_spike and bear_structure:
-                logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Spike)")
+            if is_ema_bear and is_macd_bear and is_rsi_bear and bear_structure:
+                logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Bear)")
                 return "SELL"
             if _bear_crossover_confirmed() and bear_structure:
                 logger.info("SIGNAL: CONFIRMED CROSSOVER SELL (%d bars)", confirm_bars)
