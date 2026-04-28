@@ -99,8 +99,15 @@ def test_final_equity_is_positive(uptrend_broker):
 # ---------------------------------------------------------------------------
 
 
-def test_uptrend_generates_trades(uptrend_broker):
-    """A strong uptrend must produce at least one BUY fill."""
+def test_uptrend_generates_trades(uptrend_broker, monkeypatch):
+    """A strong uptrend must produce at least one BUY fill.
+
+    The RR gate is patched out so this test isolates signal-generation
+    logic rather than the cost/RR filter (which is tested separately).
+    """
+    import main
+
+    monkeypatch.setattr(main, "MIN_EXPECTED_RR", 0.0)
     broker = uptrend_broker
     state = TradingState()
     while not broker.done():
@@ -307,11 +314,16 @@ def test_shorts_disabled_keeps_bot_flat_on_sell(downtrend_broker, monkeypatch):
 
 
 def test_shorts_enabled_opens_short_on_sell_signal(tmp_path, monkeypatch):
-    """With ALLOW_SHORTS=True, a SELL signal from flat must open a short."""
+    """With ALLOW_SHORTS=True, a SELL signal from flat must open a short.
+
+    The RR gate is patched out so this test isolates the ALLOW_SHORTS branch
+    rather than the cost/RR filter.
+    """
     import main
 
     broker = _make_broker(tmp_path, [100.0 + i * 0.01 for i in range(200)])
     monkeypatch.setattr(main, "ALLOW_SHORTS", True)
+    monkeypatch.setattr(main, "MIN_EXPECTED_RR", 0.0)
     # Force a SELL signal so the test isolates the ALLOW_SHORTS branch.
     monkeypatch.setattr(main, "moving_average_signal", lambda *a, **k: "SELL")
 
