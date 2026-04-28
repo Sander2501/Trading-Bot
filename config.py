@@ -171,6 +171,41 @@ ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
 #: Warn when open working orders persist for this many consecutive cycles.
 OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
 
+# ── Telemetry ─────────────────────────────────────────────────────────────────
+#: When True, run_once writes JSONL execution events for post-trade analytics.
+TELEMETRY_ENABLED: bool = os.getenv("TELEMETRY_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+#: Path of the append-only JSONL telemetry log.
+TELEMETRY_FILE: str = os.getenv("TELEMETRY_FILE", "bot_telemetry.jsonl")
+
+# ── Risk firewall ─────────────────────────────────────────────────────────────
+#: Sentinel file that halts trading while it exists. Touch the file to engage
+#: the global kill switch; delete to resume. Empty string disables the check.
+KILL_SWITCH_FILE: str = os.getenv("KILL_SWITCH_FILE", "KILL_SWITCH")
+
+#: Halt trading for the rest of the week when drawdown vs week-start equity
+#: exceeds this fraction. 0 disables. Wider than MAX_DAILY_LOSS_PCT so a single
+#: bad day doesn't trigger it; tight enough that two bad days do.
+MAX_WEEKLY_LOSS_PCT: float = float(os.getenv("MAX_WEEKLY_LOSS_PCT", "0.06"))
+
+#: When a fill comes back with realized slippage above this threshold (bps),
+#: halt trading for SLIPPAGE_HALT_SECONDS — usually a sign of thin liquidity
+#: or a fast market that's about to chop us up. 0 disables.
+MAX_SLIP_BPS: float = float(os.getenv("MAX_SLIP_BPS", "50"))
+
+#: Cooldown applied after a max-slippage trip.
+SLIPPAGE_HALT_SECONDS: int = int(os.getenv("SLIPPAGE_HALT_SECONDS", "600"))
+
+# ── Data integrity ────────────────────────────────────────────────────────────
+#: Refuse to act on a cycle whose bar batch has fatal integrity issues
+#: (NaNs, broken OHLC invariants, duplicate timestamps, stale feed).
+#: When False, problems are logged but do not block trading.
+DATA_INTEGRITY_GATE_ENABLED: bool = os.getenv("DATA_INTEGRITY_GATE_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+#: Maximum allowed age of the latest bar relative to wall clock (seconds).
+#: 0 disables the freshness check (default: 4× the configured timeframe).
+DATA_MAX_BAR_AGE_SECONDS: int = int(os.getenv("DATA_MAX_BAR_AGE_SECONDS", "0"))
+
 # ── Filters ───────────────────────────────────────────────────────────────────
 #: Enable session-hour-based filter (suppress signals outside trading hours).
 SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
@@ -336,6 +371,16 @@ def validate_config() -> None:
     if OPEN_ORDER_STALE_CYCLES <= 0:
         raise ValueError(
             f"OPEN_ORDER_STALE_CYCLES ({OPEN_ORDER_STALE_CYCLES}) must be > 0"
+        )
+    if MAX_WEEKLY_LOSS_PCT < 0 or MAX_WEEKLY_LOSS_PCT > 1:
+        raise ValueError(
+            f"MAX_WEEKLY_LOSS_PCT ({MAX_WEEKLY_LOSS_PCT}) must be in [0, 1]"
+        )
+    if MAX_SLIP_BPS < 0:
+        raise ValueError(f"MAX_SLIP_BPS ({MAX_SLIP_BPS}) must be >= 0")
+    if SLIPPAGE_HALT_SECONDS < 0:
+        raise ValueError(
+            f"SLIPPAGE_HALT_SECONDS ({SLIPPAGE_HALT_SECONDS}) must be >= 0"
         )
     logger.debug("Configuration validated successfully.")
 

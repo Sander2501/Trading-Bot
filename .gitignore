@@ -25,3 +25,4 @@ backtest_report.json
 bot_metrics.jsonl
 bot_state.json
 bot.log*
+bot_telemetry.jsonl
