@@ -185,8 +185,7 @@ ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
 OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
 
 # ── Telemetry ─────────────────────────────────────────────────────────────────
-#: When True, run_once writes JSONL execution events for post-trade analytics.
-TELEMETRY_ENABLED: bool = os.getenv("TELEMETRY_ENABLED", "true").lower() in {"1", "true", "yes"}
+TELEMETRY_ENABLED: bool = os.getenv("TELEMETRY_ENABLED", "false").lower() in {"1", "true", "yes"}
 
 #: Path of the append-only JSONL telemetry log.
 TELEMETRY_FILE: str = os.getenv("TELEMETRY_FILE", "bot_telemetry.jsonl")
@@ -204,7 +203,7 @@ MAX_WEEKLY_LOSS_PCT: float = float(os.getenv("MAX_WEEKLY_LOSS_PCT", "0.06"))
 #: When a fill comes back with realized slippage above this threshold (bps),
 #: halt trading for SLIPPAGE_HALT_SECONDS — usually a sign of thin liquidity
 #: or a fast market that's about to chop us up. 0 disables.
-MAX_SLIP_BPS: float = float(os.getenv("MAX_SLIP_BPS", "50"))
+MAX_SLIP_BPS: float = float(os.getenv("MAX_SLIP_BPS", "0"))
 
 #: Cooldown applied after a max-slippage trip.
 SLIPPAGE_HALT_SECONDS: int = int(os.getenv("SLIPPAGE_HALT_SECONDS", "600"))

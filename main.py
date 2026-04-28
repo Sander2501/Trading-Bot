@@ -96,7 +96,7 @@ from data_integrity import check_bars, interval_seconds_for
 from strategy import atr_stop_distance, moving_average_signal
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler()],
 )
@@ -293,9 +293,9 @@ def position_size(
     qty_by_risk = (equity * RISK_PER_TRADE) / stop_distance
     effective_buying_power = max(0.0, min(equity, buying_power))
     qty_by_exposure = equity * MAX_GROSS_EXPOSURE_PCT / (price * (1 + SLIPPAGE_PCT))
-    # Cap at 99.9% of equity divided by worst-case fill price to ensure the
+    # Cap at 95% of equity divided by worst-case fill price to ensure the
     # order cost stays within available cash after slippage and float rounding.
-    qty_by_funds = effective_buying_power * 0.999 / (price * (1 + SLIPPAGE_PCT))
+    qty_by_funds = effective_buying_power * 0.95 / (price * (1 + SLIPPAGE_PCT))
     return round(max(0.0, min(qty_by_risk, qty_by_funds, qty_by_exposure)), 6)
 
 
