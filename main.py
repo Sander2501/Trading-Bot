@@ -39,6 +39,10 @@ from config import (
     DATA_INTEGRITY_GATE_ENABLED,
     DATA_MAX_BAR_AGE_SECONDS,
     ERROR_COOLDOWN_SECONDS,
+    KILL_SWITCH_FILE,
+    MAX_SLIP_BPS,
+    MAX_WEEKLY_LOSS_PCT,
+    SLIPPAGE_HALT_SECONDS,
     TELEMETRY_ENABLED,
     TELEMETRY_FILE,
     FAST_WINDOW,
@@ -79,6 +83,7 @@ from config import (
     TREND_WINDOW,
     VOLUME_FILTER_ENABLED,
 )
+import risk
 import telemetry
 from data_integrity import check_bars, interval_seconds_for
 from strategy import atr_stop_distance, moving_average_signal
@@ -124,6 +129,10 @@ class TradingState:
         self.open_order_streak: int = 0
         self.cycles: int = 0
         self.order_error_streak: int = 0
+        # Risk firewall
+        self.week_anchor_date: date | None = None
+        self.week_baseline_equity: float = 0.0
+        self.slippage_halt_until: datetime | None = None
 
     def reset_watermarks(self, price: float) -> None:
         """Seed both watermarks to *price* when a new position is opened."""
@@ -149,6 +158,9 @@ class TradingState:
             "partial_tp1_taken": self.partial_tp1_taken,
             "partial_tp2_taken": self.partial_tp2_taken,
             "last_snapshot_date": self.last_snapshot_date.isoformat() if self.last_snapshot_date else None,
+            "week_anchor_date": self.week_anchor_date.isoformat() if self.week_anchor_date else None,
+            "week_baseline_equity": self.week_baseline_equity,
+            "slippage_halt_until": self.slippage_halt_until.isoformat() if self.slippage_halt_until else None,
             "saved_at": datetime.now(timezone.utc).isoformat(),
         }
         try:
@@ -172,6 +184,11 @@ class TradingState:
             state.partial_tp2_taken = bool(data.get("partial_tp2_taken", False))
             d = data.get("last_snapshot_date")
             state.last_snapshot_date = date.fromisoformat(d) if d else None
+            wd = data.get("week_anchor_date")
+            state.week_anchor_date = date.fromisoformat(wd) if wd else None
+            state.week_baseline_equity = float(data.get("week_baseline_equity") or 0.0)
+            sh = data.get("slippage_halt_until")
+            state.slippage_halt_until = datetime.fromisoformat(sh) if sh else None
             logger.info("Restored trading state from %s.", path)
         except (FileNotFoundError, json.JSONDecodeError, KeyError):
             pass
@@ -302,8 +319,12 @@ def _submit_with_guard(
         return False
 
 
-def _record_fill(broker: BaseBroker, requested_price: float) -> None:
-    """If broker exposes a sync last_fill, emit ORDER_FILL with realized slippage."""
+def _record_fill(broker: BaseBroker, requested_price: float, state: TradingState) -> None:
+    """Emit ORDER_FILL telemetry and arm the slippage halt if abused.
+
+    Live brokers without a sync ``last_fill`` are no-ops here; for them
+    fill telemetry needs an async polling hook (separate change).
+    """
     fill = getattr(broker, "last_fill", None)
     if not fill:
         return
@@ -316,6 +337,21 @@ def _record_fill(broker: BaseBroker, requested_price: float) -> None:
         requested_price=requested_price,
         slip_bps=slip,
     )
+    if MAX_SLIP_BPS > 0 and abs(slip) > MAX_SLIP_BPS:
+        state.slippage_halt_until = risk.slippage_halt_until(
+            datetime.now(timezone.utc), SLIPPAGE_HALT_SECONDS
+        )
+        logger.error(
+            "MAX_SLIP_BPS tripped: %.1f bps on %s fill (limit %.1f). "
+            "Halting new entries until %s.",
+            slip, fill["side"], MAX_SLIP_BPS, state.slippage_halt_until.isoformat(),
+        )
+        telemetry.record(
+            "RISK_HALT",
+            kind_detail="MAX_SLIP_BPS",
+            slip_bps=slip,
+            halt_until=state.slippage_halt_until.isoformat(),
+        )
 
 
 def daily_loss_exceeded(broker: BaseBroker) -> bool:
@@ -324,6 +360,19 @@ def daily_loss_exceeded(broker: BaseBroker) -> bool:
     if last_equity <= 0:
         return False
     return (last_equity - equity) / last_equity >= MAX_DAILY_LOSS_PCT
+
+
+def _maybe_snapshot_week(broker: BaseBroker, state: TradingState) -> None:
+    """Re-anchor the weekly-loss baseline on each new ISO week (Monday rollover)."""
+    today = broker.current_date()
+    anchor = risk.week_anchor(today)
+    if state.week_anchor_date != anchor:
+        equity, _ = broker.get_equity()
+        state.week_anchor_date = anchor
+        state.week_baseline_equity = equity
+        logger.info("Weekly equity baseline re-anchored to %s ($%.2f).", anchor, equity)
+
+
 
 
 def _maybe_snapshot_day(broker: BaseBroker, state: TradingState) -> None:
@@ -376,7 +425,7 @@ def _maybe_take_partial_tp(
         ):
             setattr(state, attr, True)
             logger.info("PARTIAL %s %s: %s %.6f @ ~%.2f", label, side, verb, qty_to_close, latest_price)
-            _record_fill(broker, latest_price)
+            _record_fill(broker, latest_price, state)
             return True
     return False
 
@@ -417,8 +466,26 @@ def run_once(
         state = TradingState()
 
     _maybe_snapshot_day(broker, state)
+    _maybe_snapshot_week(broker, state)
     state.cycles += 1
     broker.flush_position_cache()
+
+    # --- Risk firewall (operator-controlled and automatic halts) ---
+    if risk.kill_switch_active(KILL_SWITCH_FILE):
+        logger.error("KILL SWITCH ACTIVE (%s) — halting cycle.", KILL_SWITCH_FILE)
+        telemetry.record("RISK_HALT", kind_detail="KILL_SWITCH", path=KILL_SWITCH_FILE)
+        if sleep_enabled:
+            time.sleep(CHECK_INTERVAL_SECONDS)
+        return
+
+    if risk.is_slippage_halted(state.slippage_halt_until):
+        logger.warning(
+            "Slippage cooldown active until %s — skipping cycle.",
+            state.slippage_halt_until.isoformat() if state.slippage_halt_until else "?",
+        )
+        if sleep_enabled:
+            time.sleep(CHECK_INTERVAL_SECONDS)
+        return
 
     is_open, wait = broker.get_market_status()
     if not is_open:
@@ -431,6 +498,23 @@ def run_once(
         logger.warning(
             f"Daily loss limit ({MAX_DAILY_LOSS_PCT:.1%}) reached. "
             "Halting for the day."
+        )
+        telemetry.record("RISK_HALT", kind_detail="DAILY_LOSS")
+        if sleep_enabled:
+            time.sleep(3600)
+        return
+
+    equity_now, _ = broker.get_equity()
+    if risk.weekly_loss_exceeded(equity_now, state.week_baseline_equity, MAX_WEEKLY_LOSS_PCT):
+        logger.warning(
+            "Weekly loss limit (%.1f%%) reached — halting until next week.",
+            MAX_WEEKLY_LOSS_PCT * 100,
+        )
+        telemetry.record(
+            "RISK_HALT",
+            kind_detail="WEEKLY_LOSS",
+            equity=equity_now,
+            week_baseline=state.week_baseline_equity,
         )
         if sleep_enabled:
             time.sleep(3600)
@@ -613,7 +697,7 @@ def run_once(
                     ref = state.position_low
                 if not ok:
                     return
-                _record_fill(broker, latest_price)
+                _record_fill(broker, latest_price, state)
 
                 state.reset_watermarks(latest_price)
                 state.seed_trade_context(0.0, 0.0)
@@ -648,7 +732,7 @@ def run_once(
                 order_meta={"side": "BUY", "qty": abs(current_qty), "requested_price": latest_price, "order_kind": "COVER_SHORT"},
             ):
                 return
-            _record_fill(broker, latest_price)
+            _record_fill(broker, latest_price, state)
             state.reset_watermarks(latest_price)
             logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
@@ -671,7 +755,7 @@ def run_once(
                     order_meta={"side": "BUY", "qty": qty, "requested_price": latest_price, "sl": sl_price, "tp": tp_price, "order_kind": "OPEN_LONG"},
                 ):
                     return
-                _record_fill(broker, latest_price)
+                _record_fill(broker, latest_price, state)
                 state.position_high = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
                 logger.info(
@@ -692,7 +776,7 @@ def run_once(
                 order_meta={"side": "SELL", "qty": current_qty, "requested_price": latest_price, "order_kind": "CLOSE_LONG"},
             ):
                 return
-            _record_fill(broker, latest_price)
+            _record_fill(broker, latest_price, state)
             state.reset_watermarks(latest_price)
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
@@ -719,7 +803,7 @@ def run_once(
                     order_meta={"side": "SELL", "qty": qty, "requested_price": latest_price, "sl": sl_price, "tp": tp_price, "order_kind": "OPEN_SHORT"},
                 ):
                     return
-                _record_fill(broker, latest_price)
+                _record_fill(broker, latest_price, state)
                 state.position_low = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
                 logger.info(
