@@ -15,8 +15,11 @@ def _rsi(series: pd.Series, window: int = 14) -> float:
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(com=window - 1, adjust=False).mean()
     avg_loss = loss.ewm(com=window - 1, adjust=False).mean()
-    # Replace zero avg_loss with NaN then fill with inf so that rs = avg_gain/0
-    # yields inf (not 0), giving RSI = 100 for all-gain series.
+    # NaN-then-fillna is intentional: replacing avg_loss=0 directly with inf
+    # would make the division yield 0 (gain/inf=0 in pandas), producing RSI=0
+    # for all-gain series.  Instead, replace 0 with NaN so the division
+    # propagates NaN, then fill those NaN entries with inf so that the
+    # RSI formula yields 100 (= 100 - 100/(1+inf)) as intended.
     rs = avg_gain / avg_loss.replace(0, float("nan"))
     return float((100 - (100 / (1 + rs.fillna(float("inf"))))).iloc[-1])
 

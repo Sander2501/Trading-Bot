@@ -123,8 +123,9 @@ TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "4.0"))
 TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
 
 #: Minimum expected reward/risk ratio after estimated costs to allow a new entry.
-#: Raised to 1.5 to ensure only high-quality setups are taken.  Values below 1.0
-#: allow negative-expectancy entries and must be avoided.
+#: At 1.5 the take-profit target must be at least 1.5× the stop distance after
+#: subtracting estimated round-trip costs.  This filters out low-quality setups
+#: where the net reward does not justify the risk taken, independent of win rate.
 MIN_EXPECTED_RR: float = float(os.getenv("MIN_EXPECTED_RR", "1.5"))
 #: Estimated round-trip execution cost as fraction of notional (spread+slippage+fees).
 ESTIMATED_ROUND_TRIP_COST_PCT: float = float(os.getenv("ESTIMATED_ROUND_TRIP_COST_PCT", "0.0015"))
@@ -134,14 +135,15 @@ BREAK_EVEN_R_MULT: float = float(os.getenv("BREAK_EVEN_R_MULT", "1.0"))
 #: Take partial profits at this R multiple (fraction configured below).
 #: Raised from 1.5→2.0 so winners have room to breathe before the first trim.
 PARTIAL_TP1_R: float = float(os.getenv("PARTIAL_TP1_R", "2.0"))
-#: Fraction of open size to close at PARTIAL_TP1_R.
+#: Fraction of the then-open position to close at PARTIAL_TP1_R.
 #: Lowered from 50%→25% so the majority of the position continues to the full target.
 PARTIAL_TP1_FRACTION: float = float(os.getenv("PARTIAL_TP1_FRACTION", "0.25"))
 #: Optional second partial take-profit R multiple.
 #: Raised from 2.0→3.0 to let more profit run before the second trim.
 PARTIAL_TP2_R: float = float(os.getenv("PARTIAL_TP2_R", "3.0"))
-#: Fraction of open size to close at PARTIAL_TP2_R.
-#: Lowered from 50%→25% of remaining so ~56% of position reaches the full 4R target.
+#: Fraction of the then-open position to close at PARTIAL_TP2_R.
+#: With TP1 closing 25% of original, TP2 at 0.25 closes 25% of the remaining 75%
+#: (~18.75% of original), leaving ~56% to ride to the full 4R target.
 PARTIAL_TP2_FRACTION: float = float(os.getenv("PARTIAL_TP2_FRACTION", "0.25"))
 
 #: Halt trading for the day once intraday drawdown exceeds this threshold.
