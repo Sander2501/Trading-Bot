@@ -64,7 +64,7 @@ ADX_TRENDING_THRESHOLD: float = float(os.getenv("ADX_TRENDING_THRESHOLD", "25.0"
 MIN_ATR_PCT: float = float(os.getenv("MIN_ATR_PCT", "0.001"))
 
 #: Enable adaptive percentile-based thresholds for ADX and ATR%.
-ADAPTIVE_THRESHOLDS_ENABLED: bool = os.getenv("ADAPTIVE_THRESHOLDS_ENABLED", "false").lower() in {"1", "true", "yes"}
+ADAPTIVE_THRESHOLDS_ENABLED: bool = os.getenv("ADAPTIVE_THRESHOLDS_ENABLED", "true").lower() in {"1", "true", "yes"}
 #: Lookback horizon (in days) used to compute adaptive ADX/ATR% percentiles.
 ADAPTIVE_LOOKBACK_DAYS: int = int(os.getenv("ADAPTIVE_LOOKBACK_DAYS", "60"))
 #: Percentile of recent ADX values used as dynamic trend-strength threshold.
