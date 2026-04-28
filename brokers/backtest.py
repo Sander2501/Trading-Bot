@@ -118,6 +118,12 @@ class BacktestBroker(BaseBroker):
         #: All fills recorded during the run.
         self.trades: list[dict] = []
 
+        #: Last fill recorded by the broker, or None if no fills yet.
+        #: Read by callers (e.g. telemetry) immediately after submit_buy/sell
+        #: to compute realized slippage. Live brokers don't expose this because
+        #: their fills are asynchronous.
+        self.last_fill: dict | None = None
+
         #: Equity snapshot after each bar, populated by :meth:`advance`.
         self.equity_curve: list[float] = []
 
@@ -369,13 +375,15 @@ class BacktestBroker(BaseBroker):
         return self._cash + self._qty * self._current_price()
 
     def _fill(self, side: str, qty: float, price: float) -> dict:
-        return {
+        fill = {
             "side": side,
             "qty": qty,
             "price": price,
             "t": self._cursor,
             "equity": self._equity(),
         }
+        self.last_fill = fill
+        return fill
 
     def _check_sl_tp(self) -> None:
         """Simulate standing SL/TP orders against the current bar's high/low.

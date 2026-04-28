@@ -162,6 +162,13 @@ ERROR_COOLDOWN_SECONDS: int = int(os.getenv("ERROR_COOLDOWN_SECONDS", "900"))
 #: Warn when open working orders persist for this many consecutive cycles.
 OPEN_ORDER_STALE_CYCLES: int = int(os.getenv("OPEN_ORDER_STALE_CYCLES", "5"))
 
+# ── Telemetry ─────────────────────────────────────────────────────────────────
+#: When True, run_once writes JSONL execution events for post-trade analytics.
+TELEMETRY_ENABLED: bool = os.getenv("TELEMETRY_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+#: Path of the append-only JSONL telemetry log.
+TELEMETRY_FILE: str = os.getenv("TELEMETRY_FILE", "bot_telemetry.jsonl")
+
 # ── Data integrity ────────────────────────────────────────────────────────────
 #: Refuse to act on a cycle whose bar batch has fatal integrity issues
 #: (NaNs, broken OHLC invariants, duplicate timestamps, stale feed).

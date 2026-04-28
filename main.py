@@ -39,6 +39,8 @@ from config import (
     DATA_INTEGRITY_GATE_ENABLED,
     DATA_MAX_BAR_AGE_SECONDS,
     ERROR_COOLDOWN_SECONDS,
+    TELEMETRY_ENABLED,
+    TELEMETRY_FILE,
     FAST_WINDOW,
     MACD_FAST,
     MACD_SIGNAL_WINDOW,
@@ -77,6 +79,7 @@ from config import (
     TREND_WINDOW,
     VOLUME_FILTER_ENABLED,
 )
+import telemetry
 from data_integrity import check_bars, interval_seconds_for
 from strategy import atr_stop_distance, moving_average_signal
 
@@ -267,8 +270,16 @@ def _submit_with_guard(
     state: TradingState,
     description: str,
     sleep_enabled: bool,
+    *,
+    order_meta: dict | None = None,
 ) -> bool:
-    """Submit an order and apply an error circuit-breaker on repeated failures."""
+    """Submit an order and apply an error circuit-breaker on repeated failures.
+
+    ``order_meta`` is recorded by telemetry on both submit and reject so
+    post-trade analytics can pair attempts with outcomes.
+    """
+    if order_meta is not None:
+        telemetry.record("ORDER_SUBMIT", description=description, **order_meta)
     try:
         submit_fn()
         state.order_error_streak = 0
@@ -276,6 +287,10 @@ def _submit_with_guard(
     except Exception as exc:
         state.order_error_streak += 1
         logger.exception("Order submission failed (%s): %s", description, exc)
+        if order_meta is not None:
+            telemetry.record(
+                "ORDER_REJECT", description=description, reason=str(exc), **order_meta
+            )
         if state.order_error_streak >= MAX_ORDER_ERRORS:
             logger.error(
                 "Order error circuit-breaker tripped (%d consecutive errors). Cooling down %ds.",
@@ -285,6 +300,22 @@ def _submit_with_guard(
             if sleep_enabled:
                 time.sleep(ORDER_ERROR_COOLDOWN_SECONDS)
         return False
+
+
+def _record_fill(broker: BaseBroker, requested_price: float) -> None:
+    """If broker exposes a sync last_fill, emit ORDER_FILL with realized slippage."""
+    fill = getattr(broker, "last_fill", None)
+    if not fill:
+        return
+    slip = telemetry.slippage_bps(requested_price, fill["price"], side=fill["side"])
+    telemetry.record(
+        "ORDER_FILL",
+        side=fill["side"],
+        qty=fill["qty"],
+        fill_price=fill["price"],
+        requested_price=requested_price,
+        slip_bps=slip,
+    )
 
 
 def daily_loss_exceeded(broker: BaseBroker) -> bool:
@@ -335,14 +366,17 @@ def _maybe_take_partial_tp(
         qty_to_close = round(max(0.0, abs_qty * frac), 6)
         if not (0 < qty_to_close < abs_qty):
             continue
+        order_side = "SELL" if is_long else "BUY"
         if _submit_with_guard(
             lambda q=qty_to_close: submit(SYMBOL, q),
             state,
             f"partial {label.lower()} {side.lower()}",
             sleep_enabled,
+            order_meta={"side": order_side, "qty": qty_to_close, "requested_price": latest_price, "order_kind": f"PARTIAL_{label}"},
         ):
             setattr(state, attr, True)
             logger.info("PARTIAL %s %s: %s %.6f @ ~%.2f", label, side, verb, qty_to_close, latest_price)
+            _record_fill(broker, latest_price)
             return True
     return False
 
@@ -484,6 +518,16 @@ def run_once(
         f"{SYMBOL} | price={latest_price:.2f} | signal={signal} "
         f"| held={current_qty:.6f} | open_order={open_order_exists}"
     )
+    telemetry.record(
+        "SIGNAL",
+        symbol=SYMBOL,
+        signal=signal,
+        price=latest_price,
+        qty_held=current_qty,
+        equity=equity,
+        open_order=open_order_exists,
+        cycle=state.cycles,
+    )
 
     if open_order_exists:
         state.open_order_streak += 1
@@ -548,12 +592,14 @@ def run_once(
                 exit_reason = "TAKE PROFIT"
 
             if exit_reason:
+                exit_kind = "STOP" if exit_reason == "TRAILING STOP" else "TAKE_PROFIT"
                 if current_qty > 0:
                     ok = _submit_with_guard(
                         lambda: broker.submit_sell(SYMBOL, current_qty),
                         state,
                         "exit long",
                         sleep_enabled,
+                        order_meta={"side": "SELL", "qty": current_qty, "requested_price": latest_price, "order_kind": f"EXIT_LONG_{exit_kind}"},
                     )
                     ref = state.position_high
                 else:
@@ -562,10 +608,12 @@ def run_once(
                         state,
                         "exit short",
                         sleep_enabled,
+                        order_meta={"side": "BUY", "qty": abs(current_qty), "requested_price": latest_price, "order_kind": f"EXIT_SHORT_{exit_kind}"},
                     )
                     ref = state.position_low
                 if not ok:
                     return
+                _record_fill(broker, latest_price)
 
                 state.reset_watermarks(latest_price)
                 state.seed_trade_context(0.0, 0.0)
@@ -597,8 +645,10 @@ def run_once(
                 state,
                 "cover short",
                 sleep_enabled,
+                order_meta={"side": "BUY", "qty": abs(current_qty), "requested_price": latest_price, "order_kind": "COVER_SHORT"},
             ):
                 return
+            _record_fill(broker, latest_price)
             state.reset_watermarks(latest_price)
             logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
@@ -618,8 +668,10 @@ def run_once(
                     state,
                     "open long",
                     sleep_enabled,
+                    order_meta={"side": "BUY", "qty": qty, "requested_price": latest_price, "sl": sl_price, "tp": tp_price, "order_kind": "OPEN_LONG"},
                 ):
                     return
+                _record_fill(broker, latest_price)
                 state.position_high = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
                 logger.info(
@@ -637,8 +689,10 @@ def run_once(
                 state,
                 "close long",
                 sleep_enabled,
+                order_meta={"side": "SELL", "qty": current_qty, "requested_price": latest_price, "order_kind": "CLOSE_LONG"},
             ):
                 return
+            _record_fill(broker, latest_price)
             state.reset_watermarks(latest_price)
             logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
         else:
@@ -662,8 +716,10 @@ def run_once(
                     state,
                     "open short",
                     sleep_enabled,
+                    order_meta={"side": "SELL", "qty": qty, "requested_price": latest_price, "sl": sl_price, "tp": tp_price, "order_kind": "OPEN_SHORT"},
                 ):
                     return
+                _record_fill(broker, latest_price)
                 state.position_low = latest_price
                 state.seed_trade_context(latest_price, stop_dist)
                 logger.info(
@@ -711,6 +767,7 @@ def run_bot(broker: BaseBroker | None = None, dry_run: bool = False) -> None:
         broker = DryRunBroker(broker)
         logger.info("DRY-RUN mode — orders will be logged but not sent.")
 
+    telemetry.configure(TELEMETRY_FILE if TELEMETRY_ENABLED else None, enabled=TELEMETRY_ENABLED)
     logger.info(f"Crypto bot started using {broker.__class__.__name__}.")
 
     state = TradingState.load()

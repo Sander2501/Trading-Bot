@@ -16,6 +16,7 @@ import statistics
 from collections import deque
 from random import Random
 
+import telemetry
 from brokers import BacktestBroker
 from config import (
     BACKTEST_DYNAMIC_SLIPPAGE_K,
@@ -27,6 +28,8 @@ from config import (
     SLIPPAGE_PCT,
     STARTING_CASH,
     SYMBOL,
+    TELEMETRY_ENABLED,
+    TELEMETRY_FILE,
     TIMEFRAME,
 )
 from main import TradingState, run_once
@@ -279,6 +282,7 @@ def run_backtest_for_csv(
 
 
 def main() -> None:
+    telemetry.configure(TELEMETRY_FILE if TELEMETRY_ENABLED else None, enabled=TELEMETRY_ENABLED)
     broker, m = run_backtest_for_csv(CSV_PATH, starting_cash=STARTING_CASH)
 
     print("\n" + "="*40)
