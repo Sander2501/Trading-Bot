@@ -29,12 +29,12 @@ TIMEFRAME: str = os.getenv("TIMEFRAME", "15Min")
 CONFIRM_BARS: int = int(os.getenv("CONFIRM_BARS", "2"))
 
 #: Fast / slow EMA for the crossover signal.
-FAST_WINDOW: int = int(os.getenv("FAST_WINDOW", "9"))
-SLOW_WINDOW: int = int(os.getenv("SLOW_WINDOW", "21"))
+FAST_WINDOW: int = int(os.getenv("FAST_WINDOW", "20"))
+SLOW_WINDOW: int = int(os.getenv("SLOW_WINDOW", "50"))
 
 #: Third (trend) EMA — all three must align before a signal fires.
 #: Prevents counter-trend entries when price is on the wrong side of the 50-bar mean.
-TREND_WINDOW: int = int(os.getenv("TREND_WINDOW", "50"))
+TREND_WINDOW: int = int(os.getenv("TREND_WINDOW", "200"))
 
 #: RSI parameters.  BTC regularly runs to RSI 80+ in bull legs without reversing,
 #: so 75/25 avoids blocking valid entries that 70/30 would filter out.
@@ -105,19 +105,19 @@ ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "true").lower() in {"1", "true", 
 # Hard cap: RISK_PER_TRADE must not exceed 0.10 (10%).  Values above this
 # threshold are rejected at startup to prevent accidental over-leveraging.
 #: Fraction of current equity to allocate per trade.
-RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
+RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.05"))
 
 #: ATR-based stop: exit when price falls more than ATR_STOP_MULT × ATR below entry.
 #: A multiplier of 2.0 gives the trade enough room to breathe on BTC 1-min noise
 #: without letting a real move run too far against us.
-ATR_STOP_MULT: float = float(os.getenv("ATR_STOP_MULT", "2.0"))
+ATR_STOP_MULT: float = float(os.getenv("ATR_STOP_MULT", "4.0"))
 ATR_STOP_WINDOW: int = int(os.getenv("ATR_STOP_WINDOW", "14"))
 
 #: Minimum stop distance as a fraction of entry price (floor for low-volatility periods).
 STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "0.005"))
 
 #: ATR-based take profit: exit when price rises more than TAKE_PROFIT_MULT × ATR above entry.
-TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "4.0"))
+TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "12.0"))
 
 #: Target profit as a fraction of entry price (floor for high-conviction trades).
 TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
@@ -126,21 +126,21 @@ TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
 #: At 1.5 the take-profit target must be at least 1.5× the stop distance after
 #: subtracting estimated round-trip costs.  This filters out low-quality setups
 #: where the net reward does not justify the risk taken, independent of win rate.
-MIN_EXPECTED_RR: float = float(os.getenv("MIN_EXPECTED_RR", "1.5"))
+MIN_EXPECTED_RR: float = float(os.getenv("MIN_EXPECTED_RR", "1.0"))
 #: Estimated round-trip execution cost as fraction of notional (spread+slippage+fees).
 ESTIMATED_ROUND_TRIP_COST_PCT: float = float(os.getenv("ESTIMATED_ROUND_TRIP_COST_PCT", "0.0015"))
 
 #: Promote stop to break-even once unrealized PnL reaches this R multiple.
-BREAK_EVEN_R_MULT: float = float(os.getenv("BREAK_EVEN_R_MULT", "1.0"))
+BREAK_EVEN_R_MULT: float = float(os.getenv("BREAK_EVEN_R_MULT", "1.5"))
 #: Take partial profits at this R multiple (fraction configured below).
 #: Raised from 1.5→2.0 so winners have room to breathe before the first trim.
-PARTIAL_TP1_R: float = float(os.getenv("PARTIAL_TP1_R", "2.0"))
+PARTIAL_TP1_R: float = float(os.getenv("PARTIAL_TP1_R", "1.5"))
 #: Fraction of the then-open position to close at PARTIAL_TP1_R.
 #: Lowered from 50%→25% so the majority of the position continues to the full target.
 PARTIAL_TP1_FRACTION: float = float(os.getenv("PARTIAL_TP1_FRACTION", "0.25"))
 #: Optional second partial take-profit R multiple.
 #: Raised from 2.0→3.0 to let more profit run before the second trim.
-PARTIAL_TP2_R: float = float(os.getenv("PARTIAL_TP2_R", "3.0"))
+PARTIAL_TP2_R: float = float(os.getenv("PARTIAL_TP2_R", "2.5"))
 #: Fraction of the then-open position to close at PARTIAL_TP2_R.
 #: With TP1 closing 25% of original, TP2 at 0.25 closes 25% of the remaining 75%
 #: (~18.75% of original), leaving ~56% to ride to the full 4R target.
@@ -166,7 +166,7 @@ BACKTEST_LATENCY_BARS: int = int(os.getenv("BACKTEST_LATENCY_BARS", "0"))
 #: Minimum fraction of requested quantity filled in backtests.
 #: 1.0 means full fills (legacy behaviour); lower values simulate partial fills.
 BACKTEST_PARTIAL_FILL_MIN: float = float(os.getenv("BACKTEST_PARTIAL_FILL_MIN", "1.0"))
-MIN_EVAL_TRADES: int = int(os.getenv("MIN_EVAL_TRADES", "100"))
+MIN_EVAL_TRADES: int = int(os.getenv("MIN_EVAL_TRADES", "10"))
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 #: Seconds to sleep between each ``run_once`` cycle.

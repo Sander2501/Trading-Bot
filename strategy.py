@@ -262,15 +262,8 @@ def moving_average_signal(
         is_rsi_bull  = rsi > 50  # momentum confirms direction (was: rsi < 45 — contradicted MACD bull)
 
         if regime == "TRENDING":
-            if is_ema_bull and is_macd_bull and is_rsi_bull and bull_structure:
-                logger.info("SIGNAL: TREND BUY (EMA Bull + MACD Bull + RSI Bull)")
-                return "BUY"
-            if _bull_crossover_confirmed() and bull_structure:
-                logger.info("SIGNAL: CONFIRMED CROSSOVER BUY (%d bars)", confirm_bars)
-                return "BUY"
-        else:
-            if rsi <= rsi_oversold:
-                logger.info("SIGNAL: RSI OVERSOLD BUY (Ranging)")
+            if is_ema_bull and is_macd_bull and bull_structure and rsi < rsi_overbought:
+                logger.info("SIGNAL: TREND BUY")
                 return "BUY"
 
     elif trend == "BEAR":
@@ -279,15 +272,8 @@ def moving_average_signal(
         is_rsi_bear  = rsi < 50  # momentum confirms direction (was: rsi > 55 — contradicted MACD bear)
 
         if regime == "TRENDING":
-            if is_ema_bear and is_macd_bear and is_rsi_bear and bear_structure:
-                logger.info("SIGNAL: TREND SELL (EMA Bear + MACD Bear + RSI Bear)")
-                return "SELL"
-            if _bear_crossover_confirmed() and bear_structure:
-                logger.info("SIGNAL: CONFIRMED CROSSOVER SELL (%d bars)", confirm_bars)
-                return "SELL"
-        else:
-            if rsi >= rsi_overbought:
-                logger.info("SIGNAL: RSI OVERBOUGHT SELL (Ranging)")
+            if is_ema_bear and is_macd_bear and bear_structure and rsi > rsi_oversold:
+                logger.info("SIGNAL: TREND SELL")
                 return "SELL"
 
     return "HOLD"
