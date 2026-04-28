@@ -66,6 +66,15 @@ ADAPTIVE_LOOKBACK_DAYS: int = int(os.getenv("ADAPTIVE_LOOKBACK_DAYS", "60"))
 ADAPTIVE_ADX_PERCENTILE: float = float(os.getenv("ADAPTIVE_ADX_PERCENTILE", "60.0"))
 #: Percentile of recent ATR% values used as dynamic low-volatility floor.
 ADAPTIVE_ATR_PERCENTILE: float = float(os.getenv("ADAPTIVE_ATR_PERCENTILE", "35.0"))
+SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+SESSION_START_HOUR_UTC: int = int(os.getenv("SESSION_START_HOUR_UTC", "7"))
+SESSION_END_HOUR_UTC: int = int(os.getenv("SESSION_END_HOUR_UTC", "22"))
+ATR_ACCEL_WINDOW: int = int(os.getenv("ATR_ACCEL_WINDOW", "20"))
+MIN_ATR_ACCEL: float = float(os.getenv("MIN_ATR_ACCEL", "0.0"))
+STRUCTURE_FILTER_ENABLED: bool = os.getenv("STRUCTURE_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+STRUCTURE_LOOKBACK: int = int(os.getenv("STRUCTURE_LOOKBACK", "5"))
+VOLUME_FILTER_ENABLED: bool = os.getenv("VOLUME_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+MIN_VOLUME: float = float(os.getenv("MIN_VOLUME", "0.0"))
 
 #: Allow opening short positions from flat on SELL signals.  Default is False
 #: because the strategy's short leg has historically been a net loser on BTC.
@@ -276,6 +285,18 @@ def validate_config() -> None:
         raise ValueError(
             f"ADAPTIVE_ATR_PERCENTILE ({ADAPTIVE_ATR_PERCENTILE}) must be in (0, 100)"
         )
+    if not (0 <= SESSION_START_HOUR_UTC <= 23 and 1 <= SESSION_END_HOUR_UTC <= 24):
+        raise ValueError("SESSION_START_HOUR_UTC/SESSION_END_HOUR_UTC must be valid UTC hours")
+    if SESSION_START_HOUR_UTC >= SESSION_END_HOUR_UTC:
+        raise ValueError("SESSION_START_HOUR_UTC must be < SESSION_END_HOUR_UTC")
+    if ATR_ACCEL_WINDOW <= 1:
+        raise ValueError(f"ATR_ACCEL_WINDOW ({ATR_ACCEL_WINDOW}) must be > 1")
+    if MIN_ATR_ACCEL < 0:
+        raise ValueError(f"MIN_ATR_ACCEL ({MIN_ATR_ACCEL}) must be >= 0")
+    if STRUCTURE_LOOKBACK < 2:
+        raise ValueError(f"STRUCTURE_LOOKBACK ({STRUCTURE_LOOKBACK}) must be >= 2")
+    if MIN_VOLUME < 0:
+        raise ValueError(f"MIN_VOLUME ({MIN_VOLUME}) must be >= 0")
     if not (0 < RISK_PER_TRADE <= 0.10):
         raise ValueError(
             f"RISK_PER_TRADE ({RISK_PER_TRADE}) must be in (0, 0.10] "
