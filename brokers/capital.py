@@ -95,6 +95,9 @@ class CapitalBroker(BaseBroker):
 
         # Per-cycle position cache: dict[symbol, position_dict | None], or None (unset)
         self._position_cache: dict | None = None
+        # Per-cycle account cache: avoids redundant /api/v1/accounts calls within
+        # a single cycle (get_buying_power + get_equity each need the same response)
+        self._account_cache: list | None = None
 
         self._create_session()
 
@@ -177,8 +180,9 @@ class CapitalBroker(BaseBroker):
     # ------------------------------------------------------------------
 
     def flush_position_cache(self) -> None:
-        """Invalidate the position cache at the start of each trading cycle."""
+        """Invalidate per-cycle caches at the start of each trading cycle."""
         self._position_cache = None
+        self._account_cache = None
 
     def _get_open_position(self, symbol: str) -> dict | None:
         """Return the open position dict for ``symbol``, or None if flat."""
@@ -308,14 +312,20 @@ class CapitalBroker(BaseBroker):
     def get_market_status(self) -> tuple[bool, float]:
         return True, 0.0  # crypto CFDs trade 24/7
 
+    def _get_accounts(self) -> list:
+        """Return the accounts list, using the per-cycle cache to avoid redundant calls."""
+        if self._account_cache is None:
+            self._account_cache = self._get("/api/v1/accounts").json().get("accounts", [])
+        return self._account_cache
+
     def get_buying_power(self) -> float:
-        accounts = self._get("/api/v1/accounts").json().get("accounts", [])
+        accounts = self._get_accounts()
         if not accounts:
             return 0.0
         return float(accounts[0]["balance"].get("available", 0))
 
     def get_equity(self) -> tuple[float, float]:
-        accounts = self._get("/api/v1/accounts").json().get("accounts", [])
+        accounts = self._get_accounts()
         if not accounts:
             return 0.0, 0.0
         bal    = accounts[0]["balance"]

@@ -506,15 +506,15 @@ def run_once(
 
     is_open, wait = broker.get_market_status()
     if not is_open:
-        logger.info(f"Market is closed. Sleeping {wait:.0f}s until open.")
+        logger.info("Market is closed. Sleeping %.0fs until open.", wait)
         if sleep_enabled:
             time.sleep(wait if wait > 0 else CHECK_INTERVAL_SECONDS)
         return
 
     if daily_loss_exceeded(broker):
         logger.warning(
-            f"Daily loss limit ({MAX_DAILY_LOSS_PCT:.1%}) reached. "
-            "Halting for the day."
+            "Daily loss limit (%.1f%%) reached. Halting for the day.",
+            MAX_DAILY_LOSS_PCT * 100,
         )
         telemetry.record("RISK_HALT", kind_detail="DAILY_LOSS")
         if sleep_enabled:
@@ -579,6 +579,7 @@ def run_once(
         "1H": 24,
         "4H": 6,
         "1D": 1,
+        "1W": 1,  # 1 bar/week ≈ 1/7 per day; round up to avoid zero lookback
     }.get(TIMEFRAME, 24 * 4)
     adaptive_lookback_bars = ADAPTIVE_LOOKBACK_DAYS * bars_per_day if ADAPTIVE_THRESHOLDS_ENABLED else 0
 
@@ -617,8 +618,8 @@ def run_once(
     equity, _ = broker.get_equity()
 
     logger.info(
-        f"{SYMBOL} | price={latest_price:.2f} | signal={signal} "
-        f"| held={current_qty:.6f} | open_order={open_order_exists}"
+        "%s | price=%.2f | signal=%s | held=%.6f | open_order=%s",
+        SYMBOL, latest_price, signal, current_qty, open_order_exists,
     )
     telemetry.record(
         "SIGNAL",
@@ -722,9 +723,9 @@ def run_once(
                 state.seed_trade_context(0.0, 0.0)
                 state.log_event(state.cycles, f"EXIT_{exit_reason.replace(' ', '_')}", {"price": latest_price})
                 logger.warning(
-                    f"{exit_reason}: closed {abs(current_qty):.6f} {SYMBOL} "
-                    f"at {latest_price:.2f} (entry {entry_price:.2f}, ref {ref:.2f}, "
-                    f"stop_dist={stop_dist:.2f}, tp_dist={tp_dist:.2f})"
+                    "%s: closed %.6f %s at %.2f (entry %.2f, ref %.2f, stop_dist=%.2f, tp_dist=%.2f)",
+                    exit_reason, abs(current_qty), SYMBOL, latest_price,
+                    entry_price, ref, stop_dist, tp_dist,
                 )
                 if sleep_enabled:
                     time.sleep(CHECK_INTERVAL_SECONDS)
@@ -759,7 +760,7 @@ def run_once(
                 return
             _record_fill(broker, latest_price, state)
             state.reset_watermarks(latest_price)
-            logger.info(f"COVER {abs(current_qty):.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            logger.info("COVER %.6f %s @ ~%.2f", abs(current_qty), SYMBOL, latest_price)
         else:
             if qty <= 0:
                 logger.info("Insufficient buying power to open long.")
@@ -785,8 +786,8 @@ def run_once(
                 state.seed_trade_context(latest_price, stop_dist)
                 state.log_event(state.cycles, "OPEN_LONG", {"qty": qty, "price": latest_price})
                 logger.info(
-                    f"BUY   {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
-                    f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
+                    "BUY   %.6f %s @ ~%.2f (SL=%.2f, TP=%.2f)",
+                    qty, SYMBOL, latest_price, sl_price, tp_price,
                 )
 
     elif signal == "SELL":
@@ -804,7 +805,7 @@ def run_once(
                 return
             _record_fill(broker, latest_price, state)
             state.reset_watermarks(latest_price)
-            logger.info(f"SELL  {current_qty:.6f} {SYMBOL} @ ~{latest_price:.2f}")
+            logger.info("SELL  %.6f %s @ ~%.2f", current_qty, SYMBOL, latest_price)
         else:
             if not ALLOW_SHORTS:
                 logger.info("SELL signal — ALLOW_SHORTS=False, staying flat.")
@@ -834,8 +835,8 @@ def run_once(
                 state.seed_trade_context(latest_price, stop_dist)
                 state.log_event(state.cycles, "OPEN_SHORT", {"qty": qty, "price": latest_price})
                 logger.info(
-                    f"SHORT {qty:.6f} {SYMBOL} @ ~{latest_price:.2f} "
-                    f"(SL={sl_price:.2f}, TP={tp_price:.2f})"
+                    "SHORT %.6f %s @ ~%.2f (SL=%.2f, TP=%.2f)",
+                    qty, SYMBOL, latest_price, sl_price, tp_price,
                 )
 
     else:
@@ -879,7 +880,7 @@ def run_bot(broker: BaseBroker | None = None, dry_run: bool = False) -> None:
         logger.info("DRY-RUN mode — orders will be logged but not sent.")
 
     telemetry.configure(TELEMETRY_FILE if TELEMETRY_ENABLED else None, enabled=TELEMETRY_ENABLED)
-    logger.info(f"Crypto bot started using {broker.__class__.__name__}.")
+    logger.info("Crypto bot started using %s.", broker.__class__.__name__)
 
     state = TradingState.load()
     error_backoff = CHECK_INTERVAL_SECONDS
@@ -890,7 +891,7 @@ def run_bot(broker: BaseBroker | None = None, dry_run: bool = False) -> None:
             run_once(broker, state, sleep_enabled=True)
             state.save()
         except Exception as exc:
-            logger.exception(f"Bot error: {exc}")
+            logger.exception("Bot error: %s", exc)
             consecutive_errors, error_backoff, tripped = _update_error_state(
                 consecutive_errors, error_backoff
             )
