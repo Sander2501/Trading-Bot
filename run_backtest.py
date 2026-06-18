@@ -192,7 +192,6 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
     sh_ci_low, sh_ci_high = _bootstrap_ci(bar_returns, _sh)
 
     monthly_returns: dict[str, float] = {}
-    regime_trade_counts = {"TRENDING": 0, "RANGING": 0}
     ts = getattr(broker, "_timestamps", None)
     if ts is not None and len(ts) > 0:
         for i in range(1, len(equity_curve)):
@@ -204,21 +203,6 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
                 monthly_returns.setdefault(month, 1.0)
                 monthly_returns[month] *= 1.0 + (equity_curve[i] - prev) / prev
         monthly_returns = {m: (v - 1.0) * 100.0 for m, v in monthly_returns.items()}
-
-    for i in range(1, len(equity_curve)):
-        if i >= len(equity_curve):
-            break
-        if i <= 0:
-            continue
-        lookback = max(0, i - 20)
-        recent = equity_curve[lookback:i + 1]
-        if len(recent) < 2:
-            continue
-        changes = [abs(recent[j] - recent[j - 1]) for j in range(1, len(recent))]
-        if sum(changes) == 0:
-            regime_trade_counts["RANGING"] += 1
-        else:
-            regime_trade_counts["TRENDING"] += 1
 
     quality_gate_pass = len(trades) >= MIN_EVAL_TRADES
 
@@ -237,7 +221,6 @@ def _compute_metrics(broker: BacktestBroker) -> dict:
         "pf_ci_95": [pf_ci_low, pf_ci_high],
         "sharpe_ci_95": [sh_ci_low, sh_ci_high],
         "monthly_returns_pct": monthly_returns,
-        "regime_bar_counts": regime_trade_counts,
     }
 
 

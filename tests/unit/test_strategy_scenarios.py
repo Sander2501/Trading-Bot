@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from strategy import (
-    _adx,
+    _adx_series,
     _macd,
     _rsi,
     moving_average_signal,
@@ -120,7 +120,7 @@ class TestSidewaysMarketHold:
     def test_adx_value_is_low_for_choppy_data(self):
         """Verify ADX itself is below 10 for oscillating data (sanity check)."""
         bars = _make_bars(_oscillating(100))
-        adx = _adx(bars["h"], bars["l"], bars["c"], window=14)
+        adx = float(_adx_series(bars["h"], bars["l"], bars["c"], window=14).iloc[-1])
         assert adx < 15, f"Expected ADX < 15 for choppy data, got {adx:.2f}"
 
 

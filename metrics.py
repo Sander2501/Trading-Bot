@@ -64,7 +64,7 @@ class TradeMetrics:
     win_rate: float = 0.0
     avg_win: float = 0.0
     avg_loss: float = 0.0
-    last_updated: datetime = field(default_factory=datetime.utcnow)
+    last_updated: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     # ------------------------------------------------------------------
     # Derived helpers

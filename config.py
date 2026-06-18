@@ -71,15 +71,6 @@ ADAPTIVE_LOOKBACK_DAYS: int = int(os.getenv("ADAPTIVE_LOOKBACK_DAYS", "60"))
 ADAPTIVE_ADX_PERCENTILE: float = float(os.getenv("ADAPTIVE_ADX_PERCENTILE", "60.0"))
 #: Percentile of recent ATR% values used as dynamic low-volatility floor.
 ADAPTIVE_ATR_PERCENTILE: float = float(os.getenv("ADAPTIVE_ATR_PERCENTILE", "35.0"))
-SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
-SESSION_START_HOUR_UTC: int = int(os.getenv("SESSION_START_HOUR_UTC", "7"))
-SESSION_END_HOUR_UTC: int = int(os.getenv("SESSION_END_HOUR_UTC", "22"))
-ATR_ACCEL_WINDOW: int = int(os.getenv("ATR_ACCEL_WINDOW", "20"))
-MIN_ATR_ACCEL: float = float(os.getenv("MIN_ATR_ACCEL", "0.0"))
-STRUCTURE_FILTER_ENABLED: bool = os.getenv("STRUCTURE_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
-STRUCTURE_LOOKBACK: int = int(os.getenv("STRUCTURE_LOOKBACK", "5"))
-VOLUME_FILTER_ENABLED: bool = os.getenv("VOLUME_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
-MIN_VOLUME: float = float(os.getenv("MIN_VOLUME", "0.0"))
 
 #: Allow opening short positions from flat on SELL signals.  Enabled by default
 #: so the strategy participates in both bull and bear legs.  Set to false to
@@ -92,10 +83,10 @@ ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "true").lower() in {"1", "true", 
 #   Moderate     : 0.02  (2%  per trade, reasonable for experienced traders) ← DEFAULT
 #   Aggressive   : 0.05  (5%  per trade, high volatility tolerance required)
 #
-# Position size formula: qty = (equity * RISK_PER_TRADE) / price
-# Example at $100,000 equity, price=$50,000:
-#   Moderate:    qty = (100,000 * 0.02) / 50,000 = 0.04 BTC (~$2,000 exposure)
-#   Aggressive:  qty = (100,000 * 0.05) / 50,000 = 0.10 BTC (~$5,000 exposure)
+# Position size formula: qty = (equity * RISK_PER_TRADE) / stop_distance
+# Example at $100,000 equity, stop_distance=$500 (1% of $50,000 BTC):
+#   Moderate:    qty = (100,000 * 0.02) / 500 = 4.0 BTC ($2,000 total dollar risk)
+#   Aggressive:  qty = (100,000 * 0.05) / 500 = 10.0 BTC ($5,000 total dollar risk)
 #
 # Expected max drawdown ranges (approximate, based on historical volatility):
 #   Conservative  (1%): ~3-5%  max drawdown under normal conditions
@@ -104,8 +95,8 @@ ALLOW_SHORTS: bool = os.getenv("ALLOW_SHORTS", "true").lower() in {"1", "true", 
 #
 # Hard cap: RISK_PER_TRADE must not exceed 0.10 (10%).  Values above this
 # threshold are rejected at startup to prevent accidental over-leveraging.
-#: Fraction of current equity to allocate per trade.
-RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.05"))
+#: Fraction of current equity to risk per trade (dollar risk / equity = RISK_PER_TRADE).
+RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE", "0.02"))
 
 #: ATR-based stop: exit when price falls more than ATR_STOP_MULT × ATR below entry.
 #: A multiplier of 2.0 gives the trade enough room to breathe on BTC 1-min noise
@@ -116,8 +107,11 @@ ATR_STOP_WINDOW: int = int(os.getenv("ATR_STOP_WINDOW", "14"))
 #: Minimum stop distance as a fraction of entry price (floor for low-volatility periods).
 STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "0.005"))
 
-#: ATR-based take profit: exit when price rises more than TAKE_PROFIT_MULT × ATR above entry.
-TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "12.0"))
+#: ATR-based take profit: exit when price moves TAKE_PROFIT_MULT × ATR in our favour.
+#: At 3.0 (default) with ATR_STOP_MULT=4.0, the TP is reachable (~75% of the stop
+#: distance) and will actually fire. 12.0 (old default) was rarely hit, making the
+#: TP purely cosmetic and leaving trailing stops as the only exit mechanism.
+TAKE_PROFIT_MULT: float = float(os.getenv("TAKE_PROFIT_MULT", "3.0"))
 
 #: Target profit as a fraction of entry price (floor for high-conviction trades).
 TAKE_PROFIT_PCT: float = float(os.getenv("TAKE_PROFIT_PCT", "0.01"))
@@ -221,21 +215,25 @@ DATA_MAX_BAR_AGE_SECONDS: int = int(os.getenv("DATA_MAX_BAR_AGE_SECONDS", "0"))
 # ── Filters ───────────────────────────────────────────────────────────────────
 #: Enable session-hour-based filter (suppress signals outside trading hours).
 SESSION_FILTER_ENABLED: bool = os.getenv("SESSION_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
-
-#: Start of trading session in UTC hours (0-23).
-SESSION_START_HOUR_UTC: int = int(os.getenv("SESSION_START_HOUR_UTC", "0"))
-
-#: End of trading session in UTC hours (0-23).
-SESSION_END_HOUR_UTC: int = int(os.getenv("SESSION_END_HOUR_UTC", "23"))
+#: Start of trading session in UTC hours (0-23). Only active when SESSION_FILTER_ENABLED=true.
+SESSION_START_HOUR_UTC: int = int(os.getenv("SESSION_START_HOUR_UTC", "7"))
+#: End of trading session in UTC hours (1-24). Only active when SESSION_FILTER_ENABLED=true.
+SESSION_END_HOUR_UTC: int = int(os.getenv("SESSION_END_HOUR_UTC", "22"))
 
 #: Enable volume-based filter (suppress signals on low volume bars).
 VOLUME_FILTER_ENABLED: bool = os.getenv("VOLUME_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
+#: Minimum bar volume required when VOLUME_FILTER_ENABLED=true.
+MIN_VOLUME: float = float(os.getenv("MIN_VOLUME", "0.0"))
 
 #: Enable price structure filter (suppress counter-trend entries).
 STRUCTURE_FILTER_ENABLED: bool = os.getenv("STRUCTURE_FILTER_ENABLED", "false").lower() in {"1", "true", "yes"}
-
-#: Lookback bars for structure analysis (higher lows/lower highs detection).
+#: Lookback bars for structure analysis (higher lows / lower highs detection).
 STRUCTURE_LOOKBACK: int = int(os.getenv("STRUCTURE_LOOKBACK", "20"))
+
+#: Window used to compute a rolling ATR baseline for ATR-acceleration filtering.
+ATR_ACCEL_WINDOW: int = int(os.getenv("ATR_ACCEL_WINDOW", "20"))
+#: Minimum ratio of current ATR% to its rolling mean; 0.0 disables the filter.
+MIN_ATR_ACCEL: float = float(os.getenv("MIN_ATR_ACCEL", "0.0"))
 
 # ── Backtest ──────────────────────────────────────────────────────────────────
 #: Path to the CSV file used by BacktestBroker.

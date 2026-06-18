@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from strategy import (
-    _adx,
+    _adx_series,
     _ema,
     _macd,
     _rsi,
@@ -120,20 +120,20 @@ class TestMacd:
 class TestAdx:
     def test_adx_is_non_negative(self):
         bars = _make_trending_bars(60)
-        adx = _adx(bars["h"], bars["l"], bars["c"], window=14)
+        adx = float(_adx_series(bars["h"], bars["l"], bars["c"], window=14).iloc[-1])
         assert adx >= 0
 
     def test_adx_is_at_most_100(self):
         bars = _make_trending_bars(60)
-        adx = _adx(bars["h"], bars["l"], bars["c"], window=14)
+        adx = float(_adx_series(bars["h"], bars["l"], bars["c"], window=14).iloc[-1])
         assert adx <= 100
 
     def test_strong_trend_higher_adx(self):
         """A strong linear trend should have higher ADX than flat prices."""
         flat = _make_bars(60, price=100.0)
         trending = _make_trending_bars(60, step=2.0)
-        adx_flat = _adx(flat["h"], flat["l"], flat["c"], window=14)
-        adx_trend = _adx(trending["h"], trending["l"], trending["c"], window=14)
+        adx_flat  = float(_adx_series(flat["h"],    flat["l"],    flat["c"],    window=14).iloc[-1])
+        adx_trend = float(_adx_series(trending["h"], trending["l"], trending["c"], window=14).iloc[-1])
         assert adx_trend > adx_flat
 
 

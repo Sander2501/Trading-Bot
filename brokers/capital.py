@@ -216,13 +216,17 @@ class CapitalBroker(BaseBroker):
 
         rows = [
             {
+                "t": p.get("snapshotTimeUTC") or p.get("snapshotTime"),
                 "h": _mid(p.get("highPrice")),
                 "l": _mid(p.get("lowPrice")),
                 "c": _mid(p.get("closePrice")),
             }
             for p in prices
         ]
-        return pd.DataFrame(rows, columns=["h", "l", "c"])
+        df = pd.DataFrame(rows, columns=["t", "h", "l", "c"])
+        # Parse timestamps so session-filter and data-integrity checks can use them.
+        df["t"] = pd.to_datetime(df["t"], utc=True, errors="coerce")
+        return df
 
     # ------------------------------------------------------------------
     # Position queries

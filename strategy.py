@@ -43,25 +43,6 @@ def _true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
     ], axis=1).max(axis=1)
 
 
-def _adx(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> float:
-    """True ATR-based ADX using high, low, close bars."""
-    tr = _true_range(high, low, close)
-    atr = tr.ewm(com=window - 1, adjust=False).mean()
-
-    up_move   = high.diff()
-    down_move = -(low.diff())
-    dm_plus  = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
-    dm_minus = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
-
-    safe_atr = atr.replace(0, float("inf"))
-    di_plus  = dm_plus.ewm(com=window - 1, adjust=False).mean()  / safe_atr * 100
-    di_minus = dm_minus.ewm(com=window - 1, adjust=False).mean() / safe_atr * 100
-    di_sum   = (di_plus + di_minus).replace(0, float("inf"))
-    dx       = (di_plus - di_minus).abs() / di_sum * 100
-    adx      = dx.ewm(com=window - 1, adjust=False).mean()
-    return float(adx.iloc[-1])
-
-
 def _adx_series(high: pd.Series, low: pd.Series, close: pd.Series, window: int = 14) -> pd.Series:
     """Return full ADX series so adaptive thresholds can be percentile-based."""
     tr = _true_range(high, low, close)
@@ -257,23 +238,48 @@ def moving_average_signal(
         bear_structure = True
 
     if trend == "BULL":
-        is_ema_bull  = curr_fast > curr_slow
         is_macd_bull = macd_hist > 0
-        is_rsi_bull  = rsi > 50  # momentum confirms direction (was: rsi < 45 — contradicted MACD bull)
+        is_rsi_bull  = rsi > 50  # momentum must agree with EMA/MACD direction
 
         if regime == "TRENDING":
-            if is_ema_bull and is_macd_bull and bull_structure and rsi < rsi_overbought:
+            # _bull_crossover_confirmed() enforces CONFIRM_BARS: the crossover must
+            # have held for confirm_bars consecutive bars AND the preceding bar was
+            # on the opposite side, preventing entries deep into an established trend.
+            if (
+                _bull_crossover_confirmed()
+                and is_macd_bull
+                and is_rsi_bull
+                and bull_structure
+                and rsi < rsi_overbought
+            ):
                 logger.info("SIGNAL: TREND BUY")
                 return "BUY"
 
+        elif regime == "RANGING":
+            # Buy oversold dips while the long-term trend (trend_ema) is bullish.
+            if rsi < rsi_oversold:
+                logger.info("SIGNAL: RANGE BUY (oversold in bull range)")
+                return "BUY"
+
     elif trend == "BEAR":
-        is_ema_bear  = curr_fast < curr_slow
         is_macd_bear = macd_hist < 0
-        is_rsi_bear  = rsi < 50  # momentum confirms direction (was: rsi > 55 — contradicted MACD bear)
+        is_rsi_bear  = rsi < 50  # momentum must agree with EMA/MACD direction
 
         if regime == "TRENDING":
-            if is_ema_bear and is_macd_bear and bear_structure and rsi > rsi_oversold:
+            if (
+                _bear_crossover_confirmed()
+                and is_macd_bear
+                and is_rsi_bear
+                and bear_structure
+                and rsi > rsi_oversold
+            ):
                 logger.info("SIGNAL: TREND SELL")
+                return "SELL"
+
+        elif regime == "RANGING":
+            # Sell overbought rallies while the long-term trend (trend_ema) is bearish.
+            if rsi > rsi_overbought:
+                logger.info("SIGNAL: RANGE SELL (overbought in bear range)")
                 return "SELL"
 
     return "HOLD"

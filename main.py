@@ -96,7 +96,7 @@ from data_integrity import check_bars, interval_seconds_for
 from strategy import atr_stop_distance, moving_average_signal
 
 logging.basicConfig(
-    level=logging.WARNING,
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[logging.StreamHandler()],
 )

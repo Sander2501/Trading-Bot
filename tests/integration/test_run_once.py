@@ -37,8 +37,23 @@ def _make_broker(tmp_path, closes, symbol="BTC/USD", starting_cash=100_000.0):
 
 @pytest.fixture
 def uptrend_broker(tmp_path):
-    """200-bar linear uptrend: guaranteed to produce at least one BUY signal."""
-    closes = [100.0 + i * 0.5 for i in range(200)]
+    """Up-then-dip-then-recover crossover fixture: 520 bars total.
+
+    Phase 1 (400 bars, up 1.0/bar): converges all EMAs (fast/slow/trend)
+      near the current price so the trend EMA is close to recent closes.
+    Phase 2 (40 bars, down 1.5/bar): drives the fast EMA below the slow EMA
+      (bearish crossover) while the trend EMA barely moves — so close stays
+      above the 200-period trend EMA throughout the pullback.
+    Phase 3 (80 bars, up 1.0/bar): drives the fast EMA back above the slow EMA
+      (bullish crossover).  Because close > trend_ema throughout, the strategy
+      classifies the market as BULL + TRENDING and fires a BUY signal once
+      _bull_crossover_confirmed() becomes True (~bar 470).
+    """
+    closes: list[float] = [100.0 + i * 1.0 for i in range(400)]
+    last = closes[-1]
+    closes += [last - i * 1.5 for i in range(1, 41)]
+    last = closes[-1]
+    closes += [last + i * 1.0 for i in range(1, 81)]
     return _make_broker(tmp_path, closes)
 
 
@@ -100,14 +115,22 @@ def test_final_equity_is_positive(uptrend_broker):
 
 
 def test_uptrend_generates_trades(uptrend_broker, monkeypatch):
-    """A strong uptrend must produce at least one BUY fill.
+    """A bullish EMA crossover must produce at least one BUY fill.
 
-    The RR gate is patched out so this test isolates signal-generation
-    logic rather than the cost/RR filter (which is tested separately).
+    Three filters are patched to isolate the signal→order pipeline:
+    - MIN_EXPECTED_RR=0: removes the risk-reward gate (tested separately).
+    - RSI_OVERBOUGHT=99: the recovery phase lifts RSI above 75 before the
+      crossover confirmation window; patching lets the signal fire.
+    - ADAPTIVE_THRESHOLDS_ENABLED=False: a 400-bar uptrend dataset has very
+      high 60th-percentile ADX (~80+), which would raise the effective trending
+      threshold above the actual ADX and suppress all signals.  Disabling
+      adaptive thresholds keeps the boundary at the fixed default (25).
     """
     import main
 
     monkeypatch.setattr(main, "MIN_EXPECTED_RR", 0.0)
+    monkeypatch.setattr(main, "RSI_OVERBOUGHT", 99.0)
+    monkeypatch.setattr(main, "ADAPTIVE_THRESHOLDS_ENABLED", False)
     broker = uptrend_broker
     state = TradingState()
     while not broker.done():
@@ -115,7 +138,7 @@ def test_uptrend_generates_trades(uptrend_broker, monkeypatch):
         broker.advance()
 
     buy_fills = [t for t in broker.trades if t["side"] in ("BUY",)]
-    assert len(buy_fills) >= 1, "Expected at least one BUY in a 200-bar uptrend"
+    assert len(buy_fills) >= 1, "Expected at least one BUY after a bullish EMA crossover"
 
 
 def test_downtrend_no_long_positions(downtrend_broker):
